@@ -73,15 +73,15 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   while (true) {
     fb = esp_camera_fb_get();
     if (!fb) {
-      Serial.println("Camera capture failed");
-      res = ESP_FAIL;
-      break;
+      Serial.println("Camera capture failed, retrying...");
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
     }
 
     if (fb->format != PIXFORMAT_JPEG) {
       esp_camera_fb_return(fb);
-      res = ESP_FAIL;
-      break;
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
     }
 
     size_t hlen = snprintf(part_buf, 64, "\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
@@ -105,6 +105,8 @@ void startCameraServer() {
   config.ctrl_port = 32768;
   config.max_open_sockets = 4;
   config.lru_purge_enable = true;
+  config.task_priority = tskIDLE_PRIORITY + 5; // High priority task for stream handling
+  config.stack_size = 8192;                    // 8 KB stack for robust JPEG packet handling
 
   httpd_uri_t stream_uri = {
     .uri       = "/stream",
@@ -115,6 +117,7 @@ void startCameraServer() {
 
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(stream_httpd, &stream_uri);
+    Serial.println("Camera Stream Server active on port 81 (/stream)");
   }
 }
 
@@ -382,9 +385,11 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  // Set the ESP to act as a Wi-Fi Access Point
+  // Set the ESP to act as a Wi-Fi Access Point with maximum RF power
   Serial.println("Starting Access Point...");
-  WiFi.softAP(ssid, password);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password, 1, 0, 4);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
 
   setupI2SAudio();
   setupButton();
