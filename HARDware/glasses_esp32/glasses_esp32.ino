@@ -5,6 +5,7 @@
 #include "esp_http_server.h"
 #include "esp_wifi.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
 #include "driver/i2s.h"
@@ -27,8 +28,8 @@ bool ledState = false, overheatIndicator = false;
 
 // Real-time diagnostics tracker
 static volatile uint32_t streamFrameCount = 0;
-static uint32_t streamFramesAtLastReport = 0;
-static unsigned long lastStreamFpsReportMs = 0;
+static portMUX_TYPE streamClientMux = portMUX_INITIALIZER_UNLOCKED;
+static bool streamClientActive = false;
 
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
@@ -66,6 +67,9 @@ bool longPressTriggered = false;
 #define AUDIO_SAMPLE_RATE  16000
 #define AUDIO_BUF_SIZE     512   // Bytes per I2S write chunk
 
+// Keep the MJPEG application task away from the Wi-Fi/camera-driver core.
+#define STREAM_HTTPD_CORE 1
+
 httpd_handle_t stream_httpd = NULL;
 
 // Handler to stream camera frames continuously as MJPEG
@@ -73,6 +77,29 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   camera_fb_t * fb = NULL;
   esp_err_t res = ESP_OK;
   char part_buf[64];
+
+  // Each client has its own capture loop. Two viewers therefore split the finite
+  // camera/PSRAM/Wi-Fi budget and commonly make both previews run near 10 FPS.
+  // The phone app is the only intended viewer, so reject extra stream clients.
+  bool streamAlreadyActive;
+  portENTER_CRITICAL(&streamClientMux);
+  streamAlreadyActive = streamClientActive;
+  if (!streamAlreadyActive) {
+    streamClientActive = true;
+  }
+  portEXIT_CRITICAL(&streamClientMux);
+  if (streamAlreadyActive) {
+    httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE,
+                        "Camera stream is already in use by another client");
+    return ESP_FAIL;
+  }
+
+  uint32_t windowFrames = 0;
+  uint64_t windowCaptureUs = 0;
+  uint64_t windowSendUs = 0;
+  uint64_t windowBytes = 0;
+  uint32_t windowCaptureFailures = 0;
+  uint32_t lastMetricsMs = millis();
 
   // Disable TCP Nagle's algorithm & enlarge send buffer on stream socket to eliminate packet delay
   int sockfd = httpd_req_to_sockfd(req);
@@ -96,6 +123,9 @@ static esp_err_t stream_handler(httpd_req_t *req) {
 
   res = httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
   if (res != ESP_OK) {
+    portENTER_CRITICAL(&streamClientMux);
+    streamClientActive = false;
+    portEXIT_CRITICAL(&streamClientMux);
     digitalWrite(LED_PIN, LOW);
     return res;
   }
@@ -104,8 +134,18 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   httpd_resp_set_hdr(req, "X-Framerate", "30");
 
   while (true) {
+    int64_t captureStartedUs = esp_timer_get_time();
     fb = esp_camera_fb_get();
+    int64_t captureFinishedUs = esp_timer_get_time();
     if (!fb) {
+      windowCaptureFailures++;
+      uint32_t nowMs = millis();
+      if (nowMs - lastMetricsMs >= 1000) {
+        Serial.printf("MJPEG [one client]: 0 FPS | camera returned no frames | dropped %lu\n",
+                      (unsigned long)windowCaptureFailures);
+        windowCaptureFailures = 0;
+        lastMetricsMs = nowMs;
+      }
       // Don't kill the stream connection on a single transient frame drop!
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
@@ -118,22 +158,39 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     }
 
     size_t hlen = snprintf(part_buf, 64, "\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
+    int64_t sendStartedUs = esp_timer_get_time();
     res = httpd_resp_send_chunk(req, part_buf, hlen);
     if (res == ESP_OK) {
       res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
       if (res == ESP_OK) {
         streamFrameCount++;
-        unsigned long now = millis();
-        if (now - lastStreamFpsReportMs >= 1000) {
-          uint32_t framesThisSecond = streamFrameCount - streamFramesAtLastReport;
-          Serial.printf("MJPEG stream: %lu FPS, last frame: %u bytes\n",
-                        (unsigned long)framesThisSecond, (unsigned)fb->len);
-          streamFramesAtLastReport = streamFrameCount;
-          lastStreamFpsReportMs = now;
-        }
+        windowFrames++;
+        windowCaptureUs += captureFinishedUs - captureStartedUs;
+        windowSendUs += esp_timer_get_time() - sendStartedUs;
+        windowBytes += fb->len;
       }
     }
     esp_camera_fb_return(fb);
+
+    uint32_t nowMs = millis();
+    if (nowMs - lastMetricsMs >= 1000) {
+      const float elapsedSeconds = (nowMs - lastMetricsMs) / 1000.0f;
+      const float captureMs = windowFrames == 0 ? 0.0f
+          : windowCaptureUs / (1000.0f * windowFrames);
+      const float sendMs = windowFrames == 0 ? 0.0f
+          : windowSendUs / (1000.0f * windowFrames);
+      const float averageJpegKb = windowFrames == 0 ? 0.0f
+          : windowBytes / (1024.0f * windowFrames);
+      Serial.printf("MJPEG [one client]: %.1f FPS | capture %.1f ms | send %.1f ms | JPEG %.1f KB | dropped %lu\n",
+                    windowFrames / elapsedSeconds, captureMs, sendMs, averageJpegKb,
+                    (unsigned long)windowCaptureFailures);
+      windowFrames = 0;
+      windowCaptureUs = 0;
+      windowSendUs = 0;
+      windowBytes = 0;
+      windowCaptureFailures = 0;
+      lastMetricsMs = nowMs;
+    }
 
     if (res != ESP_OK) {
       // Client disconnected
@@ -152,6 +209,10 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     digitalWrite(PWDN_GPIO_NUM, HIGH);
   }
 
+  portENTER_CRITICAL(&streamClientMux);
+  streamClientActive = false;
+  portEXIT_CRITICAL(&streamClientMux);
+
   return res;
 }
 
@@ -163,7 +224,7 @@ void startCameraServer() {
   config.lru_purge_enable = true;
   config.task_priority = tskIDLE_PRIORITY + 5; // High priority stream task
   config.stack_size = 8192;                    // 8KB stack for robust networking
-  config.core_id = 0;                          // Core 0 handles network tasks
+  config.core_id = STREAM_HTTPD_CORE;          // Core 0 is busy with Wi-Fi/camera work
 
   httpd_uri_t stream_uri = {
     .uri       = "/stream",
@@ -373,6 +434,7 @@ void setup() {
   // Sensor optimizations for low latency, high FPS, and fast shutter speed
   sensor_t * s = esp_camera_sensor_get();
   if (s) {
+    Serial.printf("Camera sensor detected: PID 0x%04X\n", s->id.PID);
     s->set_vflip(s, 0);
     s->set_hmirror(s, 0);
     s->set_brightness(s, 0);
@@ -520,11 +582,6 @@ void printSystemStats() {
     Serial.printf("Largest Free Block:     %u bytes\n", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     Serial.printf("CPU Frequency:          %d MHz\n", getCpuFreqMHz());
 
-    Serial.println("\nTask Name\tStatus\tPrio\tHWM (Free Stack)\tTask#");
-    Serial.println("------------------------------------------------------------------");
-    char taskListBuffer[512];
-    vTaskList(taskListBuffer);
-    Serial.println(taskListBuffer);
     Serial.println("==================================================================");
   }
 }
