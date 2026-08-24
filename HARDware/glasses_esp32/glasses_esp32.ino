@@ -128,7 +128,14 @@ void startCameraServer() {
 
 // ─── Continuous Idle Sine Wave Generator ────────────────────
 #define SINE_FREQ_HZ       440   // 440 Hz (Standard A note)
-#define SINE_AMPLITUDE     3500  // Clear, pleasant volume (out of 32767)
+// Safe amplitude for 8Ω 0.5W speaker on 3.3V (~3.5 mW power draw)
+#define SINE_AMPLITUDE     2500  // Clean, comfortable tone (out of 32767)
+
+// ─── Speaker Protection & Volume Scaling ────────────────────
+// MAX98357A on 3.3V into 8Ω delivers max ~0.56W at 0 dBFS.
+// 0.70 scaling limits max output power to ~0.28W, keeping the 0.5W
+// voice coil cool, safe, and distortion-free.
+#define AUDIO_VOLUME_SCALE 0.70f
 
 int16_t sineWaveCycle[64];
 int sineCycleLength = 0;
@@ -141,7 +148,7 @@ void initSineWave() {
   for (int i = 0; i < sineCycleLength; i++) {
     sineWaveCycle[i] = (int16_t)(sin(2.0 * PI * i / sineCycleLength) * SINE_AMPLITUDE);
   }
-  Serial.printf("Sine wave generator initialized (%d Hz @ %d Hz sample rate)\n", SINE_FREQ_HZ, AUDIO_SAMPLE_RATE);
+  Serial.printf("Sine wave generator initialized (%d Hz @ %d Hz sample rate, Safe Power Mode)\n", SINE_FREQ_HZ, AUDIO_SAMPLE_RATE);
 }
 
 void playIdleSineWave() {
@@ -209,7 +216,7 @@ void handleAudioData(WiFiClient& client, long pcmLength, int sampleRate) {
 
   // 2. Set sample rate for incoming TTS
   i2s_set_sample_rates(I2S_PORT, sampleRate);
-  Serial.printf("Audio stream (TTS): %ld bytes @ %d Hz\n", pcmLength, sampleRate);
+  Serial.printf("Audio stream (TTS): %ld bytes @ %d Hz (Scaled 0.70x for 8Ω 0.5W speaker)\n", pcmLength, sampleRate);
   client.println("OK");
   
   uint8_t buffer[AUDIO_BUF_SIZE];
@@ -227,6 +234,13 @@ void handleAudioData(WiFiClient& client, long pcmLength, int sampleRate) {
       }
     }
     if (bytesRead > 0) {
+      // Scale 16-bit PCM samples to safe output power for 8Ω 0.5W speaker
+      int16_t* samples = (int16_t*)buffer;
+      int sampleCount = bytesRead / 2;
+      for (int i = 0; i < sampleCount; i++) {
+        samples[i] = (int16_t)(samples[i] * AUDIO_VOLUME_SCALE);
+      }
+
       i2s_write(I2S_PORT, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
       bytesRemaining -= bytesRead;
     } else {
