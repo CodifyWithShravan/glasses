@@ -123,9 +123,9 @@ void startCameraServer() {
 }
 
 // ─── Continuous Idle Sine Wave Generator ────────────────────
-#define SINE_FREQ_HZ       440   // 440 Hz (Standard A note)
-// Safe amplitude for 8Ω 0.5W speaker on 3.3V (~3.5 mW power draw)
-#define SINE_AMPLITUDE     2500  // Clean, comfortable tone (out of 32767)
+#define ENABLE_IDLE_SINE_WAVE  false // Set false to eliminate Class-D electrical switching noise on camera 3.3V rail
+#define SINE_FREQ_HZ           440   // 440 Hz (Standard A note)
+#define SINE_AMPLITUDE         2500  // Clean, comfortable tone (out of 32767)
 
 // ─── Speaker Protection & Volume Scaling ────────────────────
 // MAX98357A on 3.3V into 8Ω delivers max ~0.56W at 0 dBFS.
@@ -139,15 +139,18 @@ int sinePhaseIndex = 0;
 volatile bool isPlayingTTS = false;
 
 void initSineWave() {
+#if ENABLE_IDLE_SINE_WAVE
   sineCycleLength = AUDIO_SAMPLE_RATE / SINE_FREQ_HZ;
   if (sineCycleLength > 64) sineCycleLength = 64;
   for (int i = 0; i < sineCycleLength; i++) {
     sineWaveCycle[i] = (int16_t)(sin(2.0 * PI * i / sineCycleLength) * SINE_AMPLITUDE);
   }
   Serial.printf("Sine wave generator initialized (%d Hz @ %d Hz sample rate, Safe Power Mode)\n", SINE_FREQ_HZ, AUDIO_SAMPLE_RATE);
+#endif
 }
 
 void playIdleSineWave() {
+#if ENABLE_IDLE_SINE_WAVE
   if (isPlayingTTS) return;
 
   // Generate a small chunk of 64 samples (128 bytes)
@@ -160,6 +163,7 @@ void playIdleSineWave() {
   size_t bytesWritten = 0;
   // Non-blocking quick DMA write (10ms timeout)
   i2s_write(I2S_PORT, (const char*)buffer, sizeof(buffer), &bytesWritten, 10);
+#endif
 }
 
 void setupI2SAudio() {
@@ -368,7 +372,10 @@ void setup() {
     s->set_awb_gain(s, 1);
     s->set_wb_mode(s, 0);
     s->set_exposure_ctrl(s, 1);  // Auto Exposure
+    s->set_aec2(s, 1);           // Enable DSP Auto Exposure algorithm
+    s->set_ae_level(s, -1);      // Lower exposure level to prevent blown-out highlights
     s->set_gain_ctrl(s, 1);      // Auto Gain
+    s->set_gainceiling(s, GAINCEILING_2X); // Clamp gain ceiling to 2x (prevents amplifying high-frequency noise lines)
     s->set_bpc(s, 1);            // Black Pixel Correction (cleans sensor lines)
     s->set_wpc(s, 1);            // White Pixel Correction (cleans sensor lines)
     s->set_raw_gma(s, 1);        // Gamma Correction

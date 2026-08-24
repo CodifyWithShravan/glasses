@@ -5,13 +5,13 @@
 Trains a Neural Network on sign_data.csv (supporting both 126-feature
 dual-hand and 63-feature single-hand datasets) and exports:
   1. sign_weights.json (for pure-Java embedded inference)
-  2. sign_classifier.tflite (for TFLite interpreter)
-  3. sign_labels.txt
+  2. sign_labels.txt
 Automatically syncs the new models to Android assets!
 ===========================================================
 """
 
 import os
+import csv
 import json
 import shutil
 import numpy as np
@@ -20,9 +20,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
 DATASET_PATH = "dataset/sign_data.csv"
-TFLITE_MODEL_PATH = "sign_classifier.tflite"
-LABELS_PATH = "sign_labels.txt"
 WEIGHTS_PATH = "sign_weights.json"
+LABELS_PATH = "sign_labels.txt"
 ANDROID_ASSETS_DIR = "../../AndroidApp/app/src/main/assets"
 
 
@@ -94,10 +93,61 @@ class SignClassifierNet:
         return self.forward(X)
 
 
+def sanitize_dataset(csv_path):
+    """
+    Ensures all rows in sign_data.csv have the standard 126 feature columns (127 items).
+    Automatically pads legacy 63-feature rows with 63 zeros for the second hand.
+    """
+    if not os.path.exists(csv_path):
+        return
+
+    rows = []
+    with open(csv_path, "r", newline="") as f:
+        reader = csv.reader(f)
+        for r in reader:
+            if r:
+                rows.append(r)
+
+    if not rows:
+        return
+
+    # Check if header needs update or rows need padding
+    header = []
+    for h in (1, 2):
+        for i in range(21):
+            header.extend([f"h{h}_x{i}", f"h{h}_y{i}", f"h{h}_z{i}"])
+    header.append("label")
+
+    needs_rewrite = False
+    cleaned_rows = [header]
+
+    for row in rows[1:]:
+        if len(row) == 64:  # Legacy single-hand row
+            h1 = row[:63]
+            label = row[63]
+            h2 = ["0.0"] * 63
+            cleaned_rows.append(h1 + h2 + [label])
+            needs_rewrite = True
+        elif len(row) == 127:
+            cleaned_rows.append(row)
+        else:
+            print(f"⚠️  Skipping malformed row with length {len(row)}")
+            needs_rewrite = True
+
+    if needs_rewrite:
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerows(cleaned_rows)
+        print(f"✨  Automatically harmonized and standardized dataset: {len(cleaned_rows) - 1} samples.")
+
+
 def main():
     if not os.path.exists(DATASET_PATH):
         print(f"❌  Dataset not found at {DATASET_PATH}. Run 1_collect_data.py first.")
         return
+
+    # Step 1: Auto-harmonize CSV
+    sanitize_dataset(DATASET_PATH)
 
     print(f"📊  Loading dataset from: {DATASET_PATH}")
     df = pd.read_csv(DATASET_PATH)
