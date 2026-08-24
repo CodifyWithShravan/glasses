@@ -381,7 +381,7 @@ void setup() {
   Serial.println("\n==========================================");
   Serial.println("   ESP32-S3 Smart Glasses Firmware Boot   ");
   Serial.println("==========================================");
-  Serial.printf("CPU Frequency: %d MHz\n", getCpuFreqMHz());
+  Serial.printf("CPU Frequency: %d MHz\n", getCpuFrequencyMhz());
   Serial.printf("Internal Free Heap: %d bytes\n", ESP.getFreeHeap());
 
   camera_config_t config;
@@ -583,7 +583,7 @@ void printSystemStats() {
     Serial.printf("Free Internal Heap:     %u bytes\n", ESP.getFreeHeap());
     Serial.printf("Free PSRAM:             %u bytes\n", ESP.getFreePsram());
     Serial.printf("Largest Free Block:     %u bytes\n", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    Serial.printf("CPU Frequency:          %d MHz\n", getCpuFreqMHz());
+    Serial.printf("CPU Frequency:          %d MHz\n", getCpuFrequencyMhz());
 
     Serial.println("==================================================================");
   }
