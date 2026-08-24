@@ -35,6 +35,10 @@ CSV_FILE = "dataset/sign_data.csv"        # Where the data goes
 MODEL_PATH = "hand_landmarker.task"       # MediaPipe model bundle
 NUM_LANDMARKS = 21                # MediaPipe Hands gives 21 points
 FEATURES_PER_LANDMARK = 3         # X, Y, Z for each point
+TARGET_SAMPLES_PER_LABEL = 250    # Collect balanced data before retraining
+MIN_HAND_SPAN_RATIO = 0.18        # Reject distant/low-detail hand detections
+LAPTOP_CAPTURE_WIDTH = 1280
+LAPTOP_CAPTURE_HEIGHT = 720
 # ───────────────────────────────────────────────────────────
 
 # Hand connection pairs for drawing the skeleton
@@ -74,6 +78,15 @@ def main():
     else:
         print(f"📄  Appending to existing CSV: {CSV_FILE}")
 
+    # Balanced classes matter much more than many nearly identical frames.
+    existing_label_count = 0
+    if file_exists:
+        with open(CSV_FILE, newline="") as f:
+            existing_label_count = sum(
+                1 for row in csv.DictReader(f) if row["label"] == label
+            )
+    print(f"🎯  {label}: {existing_label_count}/{TARGET_SAMPLES_PER_LABEL} samples collected")
+
     # ─── Step 3: Set up MediaPipe HandLandmarker (Tasks API) ─
     if not os.path.exists(MODEL_PATH):
         print(f"❌  Model file not found: {MODEL_PATH}")
@@ -106,10 +119,18 @@ def main():
     else:
         print("\n💻  Opening Laptop Webcam...")
         cap = cv2.VideoCapture(0)
+        # The laptop camera is for high-quality training data. The deployed
+        # ESP32 stream can remain fast at QVGA for live recognition.
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, LAPTOP_CAPTURE_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, LAPTOP_CAPTURE_HEIGHT)
 
     if not cap.isOpened():
         print(f"❌  Cannot open camera. {'Check connection to SampleESPNetwork' if is_pov else 'Check webcam permissions'}.")
         return
+
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"📐  Capture resolution: {actual_width}x{actual_height}")
 
     saved_count = 0
 
@@ -133,6 +154,7 @@ def main():
 
         # ─── Step 5: If a hand is detected, process it ────────
         normalized = None
+        hand_is_large_enough = False
         if results.hand_landmarks and len(results.hand_landmarks) > 0:
             hand_landmarks = results.hand_landmarks[0]
 
@@ -148,6 +170,11 @@ def main():
                 if c[0] < len(pts) and c[1] < len(pts):
                     cv2.line(frame, pts[c[0]], pts[c[1]], (0, 255, 0), 2)
 
+            xs = [point[0] for point in pts]
+            ys = [point[1] for point in pts]
+            hand_span_ratio = max(max(xs) - min(xs), max(ys) - min(ys)) / max(w, h)
+            hand_is_large_enough = hand_span_ratio >= MIN_HAND_SPAN_RATIO
+
             # ─── Step 6: NORMALIZE landmarks ──────────────────
             wrist = hand_landmarks[0]
             wx, wy, wz = wrist.x, wrist.y, wrist.z
@@ -160,16 +187,22 @@ def main():
                     lm.z - wz,
                 ])
 
-            cv2.putText(frame, "HAND DETECTED - press 's' to save",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                        (0, 255, 0), 2)
+            if hand_is_large_enough:
+                cv2.putText(frame, "GOOD SAMPLE - press 's' to save",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                            (0, 255, 0), 2)
+            else:
+                cv2.putText(frame, "MOVE HAND CLOSER - sample not saved",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                            (0, 165, 255), 2)
         else:
             cv2.putText(frame, "No hand detected",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                         (0, 0, 255), 2)
 
         # Show the label and count on screen
-        cv2.putText(frame, f"Label: {label}  |  Saved: {saved_count}",
+        cv2.putText(frame,
+                    f"Label: {label}  |  Total: {existing_label_count + saved_count}/{TARGET_SAMPLES_PER_LABEL}",
                     (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (255, 255, 0), 2)
 
@@ -179,13 +212,15 @@ def main():
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord("s"):
-            if normalized is not None:
+            if normalized is not None and hand_is_large_enough:
                 row = normalized + [label]
                 with open(CSV_FILE, "a", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow(row)
                 saved_count += 1
                 print(f"   💾  Saved sample #{saved_count} for '{label}'")
+            elif normalized is not None:
+                print("   ⚠️  Hand is too small in frame — move closer before saving.")
             else:
                 print("   ⚠️  No hand on screen — nothing saved.")
 

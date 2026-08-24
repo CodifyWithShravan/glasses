@@ -113,16 +113,13 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
   }
 
-  // 1. WAKE UP the camera sensor when a viewer connects
+  // 1. Indication when a viewer connects
   digitalWrite(LED_PIN, HIGH);
   if (PWDN_GPIO_NUM != -1) {
     pinMode(PWDN_GPIO_NUM, OUTPUT);
     digitalWrite(PWDN_GPIO_NUM, LOW);
   }
   sensor_t * s = esp_camera_sensor_get();
-  if (s) {
-    s->set_reg(s, 0x09, 0x01, 0x00); // Clear standby bit (Wake up)
-  }
 
   res = httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
   if (res != ESP_OK) {
@@ -201,11 +198,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     }
   }
 
-  // 2. PUT SENSOR TO SLEEP when the connection drops or the browser closes
-  if (s) {
-    s->set_reg(s, 0x09, 0x01, 0x10); // Set standby bit (Power down internal die)
-  }
-
+  // 2. Turn off indicator LED when the connection drops
   digitalWrite(LED_PIN, LOW);
   if (PWDN_GPIO_NUM != -1) {
     pinMode(PWDN_GPIO_NUM, OUTPUT);
@@ -434,28 +427,45 @@ void setup() {
     return;
   }
 
-  // Sensor optimizations for low latency, high FPS, and fast shutter speed
+  // Sensor optimizations for robust automatic exposure, white balance, and high FPS
   sensor_t * s = esp_camera_sensor_get();
   if (s) {
     Serial.printf("Camera sensor detected: PID 0x%04X\n", s->id.PID);
     s->set_vflip(s, 0);
     s->set_hmirror(s, 0);
-    s->set_brightness(s, 0);
-    s->set_contrast(s, 0);
-    s->set_saturation(s, 0);
-    s->set_special_effect(s, 0);
-    s->set_whitebal(s, 1);       // Enable Auto White Balance
-    s->set_awb_gain(s, 1);       // Auto White Balance Gain
-    s->set_wb_mode(s, 0);
-    s->set_exposure_ctrl(s, 1);  // Auto Exposure
-    s->set_aec2(s, 0);           // Disable DSP AEC2 (DSP AEC2 causes slow FPS fluctuations)
-    s->set_ae_level(s, 0);
-    s->set_gain_ctrl(s, 1);      // Auto Gain Control
-    s->set_gainceiling(s, (gainceiling_t)GAINCEILING_8X); // 8x Gain Ceiling allows 25-30 FPS shutter speed indoors
-    s->set_bpc(s, 0);
-    s->set_wpc(s, 1);
-    s->set_raw_gma(s, 1);
-    s->set_lenc(s, 0);
+    s->set_brightness(s, 0);     // (-2 to 2) - neutral brightness
+    s->set_contrast(s, 0);       // (-2 to 2) - neutral contrast
+    s->set_saturation(s, 0);     // (-2 to 2) - natural colors
+    s->set_special_effect(s, 0); // (0 to 6) - 0: No effect
+    
+    // Auto White Balance & Gain
+    s->set_whitebal(s, 1);       // 1 = Enable Auto White Balance
+    s->set_awb_gain(s, 1);       // 1 = Enable Auto White Balance Gain
+    s->set_wb_mode(s, 0);        // 0 = Auto White Balance Mode
+    
+    // Full Automatic Exposure & Gain Control
+    s->set_exposure_ctrl(s, 1);  // 1 = Enable Sensor AEC (Auto Exposure Control)
+    s->set_aec2(s, 1);           // 1 = Enable DSP AEC2 (Dynamically adapts exposure to environment)
+    s->set_ae_level(s, 0);       // (-2 to 2) - Target exposure compensation
+    s->set_gain_ctrl(s, 1);      // 1 = Enable AGC (Auto Gain Control)
+    s->set_gainceiling(s, (gainceiling_t)GAINCEILING_8X); // 8x Gain Ceiling allows high shutter speeds indoors
+    
+    // Pixel & lens corrections for accurate metering
+    s->set_bpc(s, 1);            // 1 = Black Pixel Correction
+    s->set_wpc(s, 1);            // 1 = White Pixel Correction
+    s->set_raw_gma(s, 1);        // 1 = Raw Gamma Curve (smooth dynamic range)
+    s->set_lenc(s, 1);           // 1 = Lens Correction (balances corner lighting)
+    
+    // Allow sensor AEC, AGC, and AWB algorithms to converge to ambient lighting
+    Serial.println("Calibrating auto-exposure to ambient environment...");
+    for (int i = 0; i < 10; i++) {
+      camera_fb_t * fb = esp_camera_fb_get();
+      if (fb) {
+        esp_camera_fb_return(fb);
+      }
+      delay(30);
+    }
+    Serial.println("Auto-exposure calibration complete.");
   }
 
   pinMode(LED_PIN, OUTPUT);
@@ -538,6 +548,34 @@ void loop() {
         } else if (command == "STOP_AUDIO") {
           i2s_zero_dma_buffer(I2S_PORT);
           client.println("AUDIO STOPPED");
+        } else if (command.startsWith("SET_AE_LEVEL:")) {
+          int level = command.substring(13).toInt();
+          sensor_t * s_ctl = esp_camera_sensor_get();
+          if (s_ctl) {
+            s_ctl->set_ae_level(s_ctl, constrain(level, -2, 2));
+            client.println("OK: AE_LEVEL UPDATED");
+          } else {
+            client.println("ERROR: SENSOR NOT FOUND");
+          }
+        } else if (command.startsWith("SET_BRIGHTNESS:")) {
+          int bVal = command.substring(15).toInt();
+          sensor_t * s_ctl = esp_camera_sensor_get();
+          if (s_ctl) {
+            s_ctl->set_brightness(s_ctl, constrain(bVal, -2, 2));
+            client.println("OK: BRIGHTNESS UPDATED");
+          } else {
+            client.println("ERROR: SENSOR NOT FOUND");
+          }
+        } else if (command == "AUTO_EXPOSURE:ON") {
+          sensor_t * s_ctl = esp_camera_sensor_get();
+          if (s_ctl) {
+            s_ctl->set_exposure_ctrl(s_ctl, 1);
+            s_ctl->set_aec2(s_ctl, 1);
+            s_ctl->set_gain_ctrl(s_ctl, 1);
+            client.println("OK: AUTO EXPOSURE ENABLED");
+          } else {
+            client.println("ERROR: SENSOR NOT FOUND");
+          }
         } else {
           client.println("ERROR: UNKNOWN COMMAND");
         }
