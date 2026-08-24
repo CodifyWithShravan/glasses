@@ -4,6 +4,7 @@
 #include "esp_camera.h"
 #include "esp_http_server.h"
 #include "esp_wifi.h"
+#include "esp_heap_caps.h"
 #include "driver/i2s.h"
 
 // Set your desired network name and password (password must be at least 8 characters)
@@ -21,6 +22,9 @@ const unsigned long WAIT_TIME = 90000;
 unsigned long BLINK_INTERVAL = 350;
 
 bool ledState = false, overheatIndicator = false;
+
+// Real-time diagnostics tracker
+static volatile uint32_t streamFrameCount = 0;
 
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
@@ -104,6 +108,9 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     res = httpd_resp_send_chunk(req, part_buf, hlen);
     if (res == ESP_OK) {
       res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+      if (res == ESP_OK) {
+        streamFrameCount++;
+      }
     }
     esp_camera_fb_return(fb);
 
@@ -462,6 +469,38 @@ void loop() {
         neopixelWrite(RGB_BUILTIN, 0, 0, 0);  // OFF
       }
     }
+  }
+
+  // 5. Periodic live diagnostic statistics
+  printSystemStats();
+}
+
+void printSystemStats() {
+  static unsigned long lastStatsTime = 0;
+  static uint32_t lastFrameCount = 0;
+  unsigned long now = millis();
+
+  // Print diagnostics every 5 seconds
+  if (now - lastStatsTime >= 5000) {
+    float elapsedSec = (now - lastStatsTime) / 1000.0;
+    uint32_t currentFrames = streamFrameCount;
+    float fps = (currentFrames - lastFrameCount) / elapsedSec;
+    lastFrameCount = currentFrames;
+    lastStatsTime = now;
+
+    Serial.println("\n========= ESP32 LIVE DIAGNOSTICS =========");
+    Serial.printf("Live Stream Frame Rate: %.1f FPS\n", fps);
+    Serial.printf("Free Internal Heap:     %u bytes\n", ESP.getFreeHeap());
+    Serial.printf("Free PSRAM:             %u bytes\n", ESP.getFreePsram());
+    Serial.printf("Largest Free Block:     %u bytes\n", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    Serial.printf("CPU Frequency:          %d MHz\n", getCpuFreqMHz());
+
+    Serial.println("\nTask Name\tStatus\tPrio\tHWM (Free Stack)\tTask#");
+    Serial.println("------------------------------------------------------------------");
+    char taskListBuffer[512];
+    vTaskList(taskListBuffer);
+    Serial.println(taskListBuffer);
+    Serial.println("==================================================================");
   }
 }
 
