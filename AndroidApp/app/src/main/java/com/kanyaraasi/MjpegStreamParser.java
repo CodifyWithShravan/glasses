@@ -21,14 +21,14 @@ import java.util.concurrent.Executors;
  */
 public class MjpegStreamParser {
     private static final String TAG = "MjpegStreamParser";
-    private static final int CONNECT_TIMEOUT_MS = 5000;
-    private static final int READ_TIMEOUT_MS = 5000;
+    private static final int CONNECT_TIMEOUT_MS = 10000;
+    private static final int READ_TIMEOUT_MS = 10000;
 
     private final String streamUrl;
     private final android.net.Network network;
     private OnFrameDisplayListener displayListener;
     private OnFrameProcessListener processListener;
-    private int processEveryN = 1; // Process frames for AI immediately with zero delay
+    private int processEveryN = 1;
 
     private ExecutorService executorService;
     private volatile boolean isRunning = false;

@@ -65,54 +65,50 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   esp_err_t res = ESP_OK;
   char part_buf[64];
 
-  // 1. WAKE UP the camera sensor when a viewer connects
   digitalWrite(LED_PIN, HIGH);
-  pinMode(PWDN_GPIO_NUM, OUTPUT);
-  digitalWrite(PWDN_GPIO_NUM, LOW);
-  //esp_camera_init(&config);
-  sensor_t * s = esp_camera_sensor_get();
-  if (s) {
-    s->set_reg(s, 0x09, 0x01, 0x00); // Clear standby bit (Wake up)
-  }
 
   res = httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
-  if(res != ESP_OK) return res;
+  if (res != ESP_OK) {
+    digitalWrite(LED_PIN, LOW);
+    return res;
+  }
 
-  while(true) {
+  while (true) {
     fb = esp_camera_fb_get();
     if (!fb) {
       Serial.println("Camera capture failed");
       res = ESP_FAIL;
-    } else {
-      if(fb->format != PIXFORMAT_JPEG) {
-        res = ESP_FAIL;
-      } else {
-        size_t hlen = snprintf(part_buf, 64, "\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
-        res = httpd_resp_send_chunk(req, part_buf, hlen);
-        if(res == ESP_OK) {
-          res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
-        }
-      }
+      break;
+    }
+
+    if (fb->format != PIXFORMAT_JPEG) {
       esp_camera_fb_return(fb);
-      if(res != ESP_OK) break; // Client disconnected!
+      res = ESP_FAIL;
+      break;
+    }
+
+    size_t hlen = snprintf(part_buf, 64, "\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
+    res = httpd_resp_send_chunk(req, part_buf, hlen);
+    if (res == ESP_OK) {
+      res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+    }
+
+    esp_camera_fb_return(fb);
+    if (res != ESP_OK) {
+      break; // Client disconnected
     }
   }
 
-  // 2. PUT SENSOR TO SLEEP when the connection drops or the browser closes
-  if (s) {
-    s->set_reg(s, 0x09, 0x01, 0x10); // Set standby bit (Power down internal die)
-  }
-
   digitalWrite(LED_PIN, LOW);
-  pinMode(PWDN_GPIO_NUM, OUTPUT);
-  digitalWrite(PWDN_GPIO_NUM, HIGH);
-
   return res;
 }
 
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 81; // Running stream on Port 81
+  config.ctrl_port = 32768;
+  config.max_open_sockets = 4;
+  config.lru_purge_enable = true;
 
   httpd_uri_t stream_uri = {
     .uri       = "/stream",
@@ -338,18 +334,18 @@ void setup() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 10000000;
+  config.xclk_freq_hz = 20000000; // 20 MHz clean pixel clock (eliminates horizontal scan lines)
   config.pixel_format = PIXFORMAT_JPEG;
 
-  // Utilize PSRAM if available for double buffering
+  // Utilize PSRAM if available for smooth double buffering
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_VGA; // 640x480
-    config.jpeg_quality = 15;          // 1-63 (lower means higher quality)
+    config.frame_size = FRAMESIZE_QVGA; // 320x240 (ultra smooth, high FPS, zero Wi-Fi drops)
+    config.jpeg_quality = 12;          // High clarity
     config.fb_count = 2;
     config.grab_mode = CAMERA_GRAB_LATEST;
   } else {
-    config.frame_size = FRAMESIZE_QVGA; // 320x240
-    config.jpeg_quality = 15;
+    config.frame_size = FRAMESIZE_QVGA;
+    config.jpeg_quality = 12;
     config.fb_count = 1;
   }
 
@@ -360,6 +356,24 @@ void setup() {
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x\n", err);
     return;
+  }
+
+  // Sensor Register Tuning: Eliminate horizontal scan lines and color artifacts
+  sensor_t * s = esp_camera_sensor_get();
+  if (s) {
+    s->set_brightness(s, 0);
+    s->set_contrast(s, 0);
+    s->set_saturation(s, 0);
+    s->set_whitebal(s, 1);       // Auto White Balance
+    s->set_awb_gain(s, 1);
+    s->set_wb_mode(s, 0);
+    s->set_exposure_ctrl(s, 1);  // Auto Exposure
+    s->set_gain_ctrl(s, 1);      // Auto Gain
+    s->set_bpc(s, 1);            // Black Pixel Correction (cleans sensor lines)
+    s->set_wpc(s, 1);            // White Pixel Correction (cleans sensor lines)
+    s->set_raw_gma(s, 1);        // Gamma Correction
+    s->set_lenc(s, 1);           // Lens Correction
+    s->set_dcw(s, 1);            // Downsize Compensation (cleans horizontal banding)
   }
 
   pinMode(LED_PIN, OUTPUT);
