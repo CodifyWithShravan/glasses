@@ -8,8 +8,6 @@ import android.net.wifi.WifiNetworkSpecifier;
 import android.os.Build;
 import android.widget.TextView;
 
-import org.w3c.dom.Text;
-
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serial;
@@ -19,19 +17,34 @@ import java.util.concurrent.Executors;
 
 public class SerialScanner {
 
+    public interface EspNetworkListener {
+        void onAvailable(Network network);
+        void onLost(Network network);
+    }
+
     SerialScanner(){
 
     }
 
-    boolean isWifiConnected = false;
+    private volatile boolean isWifiConnected = false;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
-    private Network currentNetwork = null;
+    private volatile Network currentNetwork = null;
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private volatile EspNetworkListener networkListener;
+
+    public void setNetworkListener(EspNetworkListener listener) {
+        networkListener = listener;
+    }
 
     // Method to initiate the dual-network state
     public void connectToEsp32(Context context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ConnectivityManager connManager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (connectivityManager != null && networkCallback != null) {
+                return; // The ESP32 network request is already active.
+            }
+            connectivityManager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
 
             // Define the specific ESP32 network credentials
             WifiNetworkSpecifier specifier = new WifiNetworkSpecifier.Builder()
@@ -46,7 +59,7 @@ public class SerialScanner {
                     .setNetworkSpecifier(specifier)
                     .build();
 
-            connManager.requestNetwork(request, new ConnectivityManager.NetworkCallback() {
+            networkCallback = new ConnectivityManager.NetworkCallback() {
                 @Override
                 public void onAvailable(Network network) {
                     super.onAvailable(network);
@@ -56,6 +69,10 @@ public class SerialScanner {
                     // Instead, we save the network object and explicitly route ESP32 traffic through it.
                     currentNetwork = network;
                     isWifiConnected = true;
+                    EspNetworkListener listener = networkListener;
+                    if (listener != null) {
+                        listener.onAvailable(network);
+                    }
                 }
 
                 @Override
@@ -63,9 +80,28 @@ public class SerialScanner {
                     super.onLost(network);
                     currentNetwork = null;
                     isWifiConnected = false;
+                    EspNetworkListener listener = networkListener;
+                    if (listener != null) {
+                        listener.onLost(network);
+                    }
                 }
-            });
+            };
+            connectivityManager.requestNetwork(request, networkCallback);
         }
+    }
+
+    public void disconnectFromEsp32() {
+        if (connectivityManager != null && networkCallback != null) {
+            try {
+                connectivityManager.unregisterNetworkCallback(networkCallback);
+            } catch (IllegalArgumentException ignored) {
+                // The request may already have been released by the system.
+            }
+        }
+        networkCallback = null;
+        connectivityManager = null;
+        currentNetwork = null;
+        isWifiConnected = false;
     }
 
     public Network getEspNetwork() {
@@ -95,7 +131,7 @@ public class SerialScanner {
                 if (bytesRead > 0) {
                     String response = new String(buffer, 0, bytesRead);
                     System.out.println("ESP32 Response: " + response);
-                    mainText.setText(response);
+                    mainText.post(() -> mainText.setText(response));
                 }
 
                 // Close the socket to free resources

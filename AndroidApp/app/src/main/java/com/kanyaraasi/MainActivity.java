@@ -4,11 +4,7 @@ import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
-import android.net.ConnectivityManager;
 import android.net.Network;
-import android.net.NetworkCapabilities;
-import android.net.NetworkRequest;
-import android.net.wifi.WifiNetworkSpecifier;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -57,9 +53,6 @@ public class MainActivity extends AppCompatActivity{
     boolean aiEnabled = false;
 
     private SerialScanner serialScanner = new SerialScanner();
-    ConnectivityManager connManager;
-    ConnectivityManager.NetworkCallback networkCallback;
-
     // AI Pipeline Components
     private HandSignClassifier handSignClassifier;
     private MjpegStreamParser mjpegStreamParser;
@@ -113,7 +106,6 @@ public class MainActivity extends AppCompatActivity{
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.main_text);
-        checkPermissionsAndConnect();
 
         submitButton = findViewById(R.id.button);
         mainText = findViewById(R.id.textView);
@@ -134,22 +126,9 @@ public class MainActivity extends AppCompatActivity{
         aiConfidence = findViewById(R.id.aiConfidence);
         aiStatus = findViewById(R.id.aiStatus);
 
-        connManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-
-        WifiNetworkSpecifier specifier = new WifiNetworkSpecifier.Builder()
-                .setSsid("SampleESPNetwork")
-                .build();
-
-        NetworkRequest request = new NetworkRequest.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .setNetworkSpecifier(specifier)
-                .build();
-
-        networkCallback = new ConnectivityManager.NetworkCallback() {
+        serialScanner.setNetworkListener(new SerialScanner.EspNetworkListener() {
             @Override
             public void onAvailable(@NonNull Network network){
-                //connManager.bindProcessToNetwork(network);
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -166,8 +145,6 @@ public class MainActivity extends AppCompatActivity{
 
             @Override
             public void onLost(@NonNull Network network) {
-                //connManager.bindProcessToNetwork(null);
-                // Called when network disconnects
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -175,18 +152,17 @@ public class MainActivity extends AppCompatActivity{
                         connStatus.setText("DISCONNECTED");
                         connStatus.setTextColor(Color.RED);
                         retryButton.setEnabled(true);
-                        camIsActive = false;
-
-                        // Stop AI if running when network drops
-                        if (aiEnabled) {
-                            toggleAI();
+                        if (mjpegStreamParser != null) {
+                            mjpegStreamParser.stop();
+                            mjpegStreamParser = null;
                         }
+                        clearPreviewFrames();
+                        camIsActive = false;
                     }
                 });
             }
-        };
-
-        connManager.registerDefaultNetworkCallback(networkCallback);
+        });
+        checkPermissionsAndConnect();
 
         connStatus.addTextChangedListener(new TextWatcher() {
             @Override
@@ -293,9 +269,14 @@ public class MainActivity extends AppCompatActivity{
 
     @Override
     protected void onDestroy(){
-        super.onDestroy();
         handler.removeCallbacks(runnable);
         cleanupAI();
+        serialScanner.disconnectFromEsp32();
+        if (udpButtonSocket != null) {
+            udpButtonSocket.close();
+            udpButtonSocket = null;
+        }
+        super.onDestroy();
     }
 
     /**
@@ -796,6 +777,25 @@ public class MainActivity extends AppCompatActivity{
                     neededPermissions.toArray(new String[0]), 101);
         } else {
             serialScanner.connectToEsp32(this);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != 101) {
+            return;
+        }
+        boolean locationGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+        boolean audioGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+        if (locationGranted && audioGranted) {
+            serialScanner.connectToEsp32(this);
+        } else {
+            connStatus.setText("Permissions are required to connect to the glasses");
+            connStatus.setTextColor(Color.RED);
         }
     }
 
