@@ -412,6 +412,9 @@ void loop() {
   // 3. Non-blocking TCP Command handling
   WiFiClient client = tcpServer.available();
   if (client) {
+    client.setNoDelay(true); // Disable Nagle's algorithm for instant response
+    client.setTimeout(50);   // Max 50ms block, prevents 1-second default timeout freeze
+
     if (client.available()) {
       String command = client.readStringUntil('\n');
       command.trim();
@@ -443,6 +446,8 @@ void loop() {
         }
       }
     }
+    client.flush();
+    client.stop(); // Explicitly close the short-lived command socket
   }
 
   if (currentMillis >= WAIT_TIME) {
