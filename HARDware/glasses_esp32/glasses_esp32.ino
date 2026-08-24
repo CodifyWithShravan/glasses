@@ -89,8 +89,11 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   }
   portEXIT_CRITICAL(&streamClientMux);
   if (streamAlreadyActive) {
-    httpd_resp_send_err(req, HTTPD_503_SERVICE_UNAVAILABLE,
-                        "Camera stream is already in use by another client");
+    // HTTPD_503_SERVICE_UNAVAILABLE is unavailable in older Arduino-ESP32
+    // cores, so build the same portable HTTP response without that enum.
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, "Camera stream is already in use by another client");
     return ESP_FAIL;
   }
 
