@@ -41,16 +41,16 @@ bool ledState = false, overheatIndicator = false;
 #define LED_PIN 2
 
 // ─── Hardware Button Configuration (Temple Arm Button) ─────
-// Connect momentary button between GPIO 1 and GND.
-#define BUTTON_PIN 1
+// Connect momentary 4-pin switch between GPIO 19 and GND.
+#define BUTTON_PIN 19
 
 unsigned long buttonPressStartTime = 0;
 bool buttonIsPressed = false;
 bool longPressTriggered = false;
 
 // ─── I2S Audio Configuration (MAX98357A) ───────────────────
-// NOTE: These pins must NOT conflict with the camera bus.
-#define I2S_BCLK_PIN    14   // Bit Clock
+// Configured for user's available soldering pins: 48, 21, 47
+#define I2S_BCLK_PIN    48   // Bit Clock
 #define I2S_LRC_PIN     21   // Left/Right Clock (Word Select)
 #define I2S_DOUT_PIN    47   // Data Out to MAX98357A DIN
 #define I2S_PORT        I2S_NUM_0
@@ -206,7 +206,7 @@ const unsigned long DOUBLE_TAP_GAP_MS = 350;
 void setupButton() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   udp.begin(UDP_BUTTON_PORT);
-  Serial.println("Hardware button listener initialized on GPIO 1 (Single/Double/Hold)");
+  Serial.printf("Hardware button listener initialized on GPIO %d (Single/Double/Hold)\n", BUTTON_PIN);
 }
 
 void sendButtonEvent(const char* event) {
