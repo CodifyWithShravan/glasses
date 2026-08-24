@@ -76,7 +76,9 @@ public class HandSignClassifier {
 
             HandLandmarker.HandLandmarkerOptions options = HandLandmarker.HandLandmarkerOptions.builder()
                     .setBaseOptions(baseOptions)
-                    .setRunningMode(RunningMode.IMAGE)
+                    // VIDEO mode tracks landmarks across frames. IMAGE mode starts a
+                    // full hand search every time, which is needlessly slow for a stream.
+                    .setRunningMode(RunningMode.VIDEO)
                     .setNumHands(1)
                     .setMinHandDetectionConfidence(0.3f)
                     .build();
@@ -244,7 +246,8 @@ public class HandSignClassifier {
             MPImage mpImage = new BitmapImageBuilder(argbBitmap).build();
 
             // Run MediaPipe hand detection
-            HandLandmarkerResult result = handLandmarker.detect(mpImage);
+            HandLandmarkerResult result = handLandmarker.detectForVideo(
+                    mpImage, Math.max(1L, timestampMs));
 
             if (result == null || result.landmarks().isEmpty()) {
                 return new AIResult(null, 0f, false, 0, "AI: Scanning... (Frame #" + framesScanned + ", No hand)");

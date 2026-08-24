@@ -12,6 +12,7 @@ import android.net.wifi.WifiNetworkSpecifier;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.util.Log;
@@ -31,6 +32,9 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import com.kanyaraasi.glassescontroller.R;
+
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 
 public class MainActivity extends AppCompatActivity{
@@ -66,6 +70,13 @@ public class MainActivity extends AppCompatActivity{
     private FaceDatabase faceDatabase;
     private VoiceEnrollmentManager voiceEnrollmentManager;
     private volatile Bitmap latestCameraFrame = null;
+
+    // The parser can decode frames faster than the main thread can draw them. Keep
+    // only one pending frame, rather than queueing one UI task per JPEG frame.
+    private final AtomicReference<Bitmap> pendingPreviewFrame = new AtomicReference<>();
+    private final AtomicBoolean previewRenderQueued = new AtomicBoolean(false);
+    private Bitmap displayedPreviewFrame;
+    private final Runnable renderLatestPreview = this::renderLatestPreviewFrame;
 
     // Object & Obstacle Detection (Blind Assistance)
     private ObjectDetectionEngine objectDetectionEngine;
@@ -348,6 +359,7 @@ public class MainActivity extends AppCompatActivity{
                 mjpegStreamParser.stop();
                 mjpegStreamParser = null;
             }
+            clearPreviewFrames();
             camIsActive = false;
             
             // Restart normal camera feed
@@ -375,6 +387,7 @@ public class MainActivity extends AppCompatActivity{
                 mjpegStreamParser.stop();
                 mjpegStreamParser = null;
             }
+            clearPreviewFrames();
             camIsActive = false;
 
             // Create and start the MJPEG stream parser, passing the specific ESP32 network
@@ -384,17 +397,17 @@ public class MainActivity extends AppCompatActivity{
             mjpegStreamParser.setDisplayListener(new MjpegStreamParser.OnFrameDisplayListener() {
                 @Override
                 public void onFrameForDisplay(Bitmap frame) {
-                    latestCameraFrame = frame;
-                    runOnUiThread(() -> {
-                        if (aiEnabled && frame != null) {
-                            aiCameraPreview.setImageBitmap(frame);
-                        }
-                    });
+                    postPreviewFrame(frame);
                 }
             });
 
             // Set listener to run AI processing on every Nth frame
             mjpegStreamParser.setProcessListener(new MjpegStreamParser.OnFrameProcessListener() {
+                @Override
+                public boolean canAcceptFrame() {
+                    return canAcceptAiFrame();
+                }
+
                 @Override
                 public void onFrameForProcessing(Bitmap frame) {
                     processFrameForAI(frame);
@@ -403,6 +416,7 @@ public class MainActivity extends AppCompatActivity{
             mjpegStreamParser.setProcessEveryN(3); // Decouple AI inference from camera display for smooth 30 FPS
             
             mjpegStreamParser.start();
+            camIsActive = true;
 
             aiStatus.setText("AI: Scanning for hand signs...");
             Log.d(TAG, "AI recognition enabled");
@@ -411,7 +425,11 @@ public class MainActivity extends AppCompatActivity{
 
     // Dedicated asynchronous worker for AI inference to prevent video stream lag
     private final java.util.concurrent.ExecutorService aiExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
-    private final java.util.concurrent.atomic.AtomicBoolean isAiProcessing = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final AtomicBoolean isAiProcessing = new AtomicBoolean(false);
+
+    private boolean canAcceptAiFrame() {
+        return (aiEnabled || objectDetectionEnabled) && !isAiProcessing.get();
+    }
 
     /**
      * Process a single video frame through the AI pipeline.
@@ -435,7 +453,8 @@ public class MainActivity extends AppCompatActivity{
 
         aiExecutor.execute(() -> {
             try {
-                long timestampMs = System.currentTimeMillis();
+                // MediaPipe VIDEO mode requires a monotonic timestamp.
+                long timestampMs = SystemClock.uptimeMillis();
 
                 // 1. Hand Sign Recognition (if enabled)
                 if (aiEnabled && handSignClassifier != null) {
@@ -737,6 +756,8 @@ public class MainActivity extends AppCompatActivity{
             mjpegStreamParser.stop();
             mjpegStreamParser = null;
         }
+        clearPreviewFrames();
+        aiExecutor.shutdownNow();
         if (handSignClassifier != null) {
             handSignClassifier.close();
             handSignClassifier = null;
@@ -790,14 +811,19 @@ public class MainActivity extends AppCompatActivity{
 
         mjpegStreamParser = new MjpegStreamParser(STREAM_URL, serialScanner.getEspNetwork());
         mjpegStreamParser.setDisplayListener(frame -> {
-            latestCameraFrame = frame;
-            runOnUiThread(() -> {
-                if (frame != null && !frame.isRecycled()) {
-                    aiCameraPreview.setImageBitmap(frame);
-                }
-            });
+            postPreviewFrame(frame);
         });
-        mjpegStreamParser.setProcessListener(this::processFrameForAI);
+        mjpegStreamParser.setProcessListener(new MjpegStreamParser.OnFrameProcessListener() {
+            @Override
+            public boolean canAcceptFrame() {
+                return canAcceptAiFrame();
+            }
+
+            @Override
+            public void onFrameForProcessing(Bitmap frame) {
+                processFrameForAI(frame);
+            }
+        });
         mjpegStreamParser.setProcessEveryN(3); // Decouple AI inference from camera display for smooth 30 FPS
         mjpegStreamParser.start();
         camIsActive = true;
@@ -810,10 +836,57 @@ public class MainActivity extends AppCompatActivity{
                 mjpegStreamParser.stop();
                 mjpegStreamParser = null;
             }
-            aiCameraPreview.setImageBitmap(null);
+            clearPreviewFrames();
             camIsActive = false;
         } else {
             ensureStreamRunning();
+        }
+    }
+
+    /** Called on the parser thread; replaces stale preview work instead of queuing it. */
+    private void postPreviewFrame(Bitmap frame) {
+        if (frame == null || frame.isRecycled()) {
+            return;
+        }
+        Bitmap replaced = pendingPreviewFrame.getAndSet(frame);
+        recycleBitmap(replaced);
+        if (previewRenderQueued.compareAndSet(false, true)) {
+            handler.post(renderLatestPreview);
+        }
+    }
+
+    /** Runs on the main thread and displays only the newest decoded camera frame. */
+    private void renderLatestPreviewFrame() {
+        Bitmap nextFrame = pendingPreviewFrame.getAndSet(null);
+        previewRenderQueued.set(false);
+        if (nextFrame != null && !nextFrame.isRecycled()) {
+            Bitmap previousFrame = displayedPreviewFrame;
+            displayedPreviewFrame = nextFrame;
+            latestCameraFrame = nextFrame;
+            aiCameraPreview.setImageBitmap(nextFrame);
+            recycleBitmap(previousFrame);
+        }
+
+        // A frame may have arrived after getAndSet(null) but before the queued flag
+        // was cleared. Schedule one more render in that case.
+        if (pendingPreviewFrame.get() != null && previewRenderQueued.compareAndSet(false, true)) {
+            handler.post(renderLatestPreview);
+        }
+    }
+
+    private void clearPreviewFrames() {
+        handler.removeCallbacks(renderLatestPreview);
+        previewRenderQueued.set(false);
+        recycleBitmap(pendingPreviewFrame.getAndSet(null));
+        aiCameraPreview.setImageBitmap(null);
+        latestCameraFrame = null;
+        recycleBitmap(displayedPreviewFrame);
+        displayedPreviewFrame = null;
+    }
+
+    private static void recycleBitmap(Bitmap bitmap) {
+        if (bitmap != null && !bitmap.isRecycled()) {
+            bitmap.recycle();
         }
     }
 

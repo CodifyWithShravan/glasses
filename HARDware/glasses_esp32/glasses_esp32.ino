@@ -27,6 +27,8 @@ bool ledState = false, overheatIndicator = false;
 
 // Real-time diagnostics tracker
 static volatile uint32_t streamFrameCount = 0;
+static uint32_t streamFramesAtLastReport = 0;
+static unsigned long lastStreamFpsReportMs = 0;
 
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
@@ -121,6 +123,14 @@ static esp_err_t stream_handler(httpd_req_t *req) {
       res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
       if (res == ESP_OK) {
         streamFrameCount++;
+        unsigned long now = millis();
+        if (now - lastStreamFpsReportMs >= 1000) {
+          uint32_t framesThisSecond = streamFrameCount - streamFramesAtLastReport;
+          Serial.printf("MJPEG stream: %lu FPS, last frame: %u bytes\n",
+                        (unsigned long)framesThisSecond, (unsigned)fb->len);
+          streamFramesAtLastReport = streamFrameCount;
+          lastStreamFpsReportMs = now;
+        }
       }
     }
     esp_camera_fb_return(fb);
@@ -335,8 +345,11 @@ void setup() {
   // Utilize PSRAM if available for triple buffering & high FPS
   if (psramFound()) {
     Serial.printf("PSRAM: ENABLED (Free PSRAM: %d bytes)\n", ESP.getFreePsram());
-    config.frame_size = FRAMESIZE_VGA; // 640x480
-    config.jpeg_quality = 12;          // 12 for high quality and small payload (~18KB)
+    // Hand landmarks are fed to a small model, so VGA only increases JPEG encode,
+    // Wi-Fi, decode, and GC work. QVGA is fast enough for clear close-up signs and
+    // is much better suited to a 30 FPS ESP32 camera pipeline.
+    config.frame_size = FRAMESIZE_QVGA; // 320x240
+    config.jpeg_quality = 15;           // Smaller JPEGs leave bandwidth for 30 FPS
     config.fb_count = 3;               // Triple buffer for seamless DMA pipelining
     config.grab_mode = CAMERA_GRAB_LATEST; // Always fetch freshest frame
   } else {

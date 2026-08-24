@@ -2,6 +2,7 @@ package com.kanyaraasi;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.BufferedInputStream;
@@ -44,6 +45,13 @@ public class MjpegStreamParser {
      * Listener that receives every Nth frame for AI processing.
      */
     public interface OnFrameProcessListener {
+        /**
+         * Called before making the expensive ARGB copy needed by the AI pipeline.
+         * Return false when the previous inference is still running so this frame can
+         * be discarded without allocating another full-size bitmap.
+         */
+        boolean canAcceptFrame();
+
         void onFrameForProcessing(Bitmap frame);
     }
 
@@ -116,6 +124,9 @@ public class MjpegStreamParser {
     private void parseStream() {
         byte[] readBuffer = new byte[65536];
         ByteArrayOutputStream headerBuffer = new ByteArrayOutputStream(256);
+        BitmapFactory.Options decodeOptions = new BitmapFactory.Options();
+        decodeOptions.inPreferredConfig = Bitmap.Config.RGB_565;
+        decodeOptions.inSampleSize = 1;
 
         while (isRunning) {
             HttpURLConnection connection = null;
@@ -144,6 +155,8 @@ public class MjpegStreamParser {
                 Log.d(TAG, "Connected! Content-Type: " + connection.getContentType());
                 inputStream = new BufferedInputStream(connection.getInputStream(), 65536);
                 int frameCount = 0;
+                int framesSinceLastReport = 0;
+                long lastFpsReportMs = SystemClock.elapsedRealtime();
 
                 while (isRunning) {
                     // Read the multipart header until \r\n\r\n
@@ -172,10 +185,8 @@ public class MjpegStreamParser {
 
                         if (bytesRead == contentLength) {
                             frameCount++;
-                            BitmapFactory.Options options = new BitmapFactory.Options();
-                            options.inPreferredConfig = Bitmap.Config.RGB_565; // 50% less RAM, faster decode
-                            options.inSampleSize = 1;
-                            Bitmap bitmap = BitmapFactory.decodeByteArray(readBuffer, 0, contentLength, options);
+                            framesSinceLastReport++;
+                            Bitmap bitmap = BitmapFactory.decodeByteArray(readBuffer, 0, contentLength, decodeOptions);
                             
                             if (bitmap != null) {
                                 // Send EVERY frame for display (camera preview)
@@ -184,11 +195,23 @@ public class MjpegStreamParser {
                                 }
 
                                 // Send every Nth frame for AI processing
-                                if (processListener != null && frameCount % processEveryN == 0) {
+                                if (processListener != null
+                                        && frameCount % processEveryN == 0
+                                        && processListener.canAcceptFrame()) {
                                     Bitmap processCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false);
                                     if (processCopy != null) {
                                         processListener.onFrameForProcessing(processCopy);
                                     }
+                                }
+
+                                long nowMs = SystemClock.elapsedRealtime();
+                                if (nowMs - lastFpsReportMs >= 1000) {
+                                    float fps = framesSinceLastReport * 1000f / (nowMs - lastFpsReportMs);
+                                    Log.i(TAG, String.format(java.util.Locale.US,
+                                            "Decoded %.1f FPS (%d frames, %dx%d)", fps,
+                                            framesSinceLastReport, bitmap.getWidth(), bitmap.getHeight()));
+                                    framesSinceLastReport = 0;
+                                    lastFpsReportMs = nowMs;
                                 }
                             } else {
                                 Log.w(TAG, "Failed to decode JPEG frame #" + frameCount);
@@ -272,4 +295,3 @@ public class MjpegStreamParser {
         return null;
     }
 }
-
