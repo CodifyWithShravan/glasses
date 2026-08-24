@@ -1,81 +1,210 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:gravity="center"
-    android:orientation="vertical">
-
-    <!-- ID updated to txtResult to match your Java code -->
+    android:fillViewport="true">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal">
+        android:orientation="vertical"
+        android:padding="12dp">
 
+        <!-- Connection Status Row (Always at the top) -->
         <LinearLayout
-            android:layout_width="200dp"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:paddingLeft="10dp"
-            android:paddingRight="10dp">
-
-            <TextView
-                android:id="@+id/textView2"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Connection Status:" />
-
-            <TextView
-                android:id="@+id/connStatus"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="CHECKING..."
-                android:textSize="20sp" />
-        </LinearLayout>
-
-        <Button
-            android:id="@+id/retry_button"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Retry connection"></Button>
-    </LinearLayout>
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="#15000000"
+            android:padding="8dp"
+            android:layout_marginBottom="8dp">
 
-    <TextView
-        android:id="@+id/textView"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="20dp"
-        android:paddingTop="10dp"
-        android:text="nothing"
-        android:textSize="18sp" />
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:paddingEnd="8dp">
 
+                <TextView
+                    android:id="@+id/textView2"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Connection Status:"
+                    android:textSize="12sp" />
 
-    <!-- ID updated to btnSendCommand to match your Java code -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:paddingHorizontal="25dp">
+                <TextView
+                    android:id="@+id/connStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="CHECKING..."
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
 
-        <Button
-            android:id="@+id/button"
+            <Button
+                android:id="@+id/retry_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Connect ESP32"
+                android:textAllCaps="false" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/textView"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Send TCP Command" />
+            android:layout_gravity="center_horizontal"
+            android:text="Ready"
+            android:textSize="14sp"
+            android:textColor="#666666" />
 
-        <Button
-            android:id="@+id/toggle_cam_button"
-            android:layout_width="wrap_content"
+        <!-- AI Recognition Status Display -->
+        <LinearLayout
+            android:id="@+id/aiStatusPanel"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Toggle camera ON/OFF" />
+            android:orientation="vertical"
+            android:padding="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/aiSignLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Sign: ---"
+                android:textSize="26sp"
+                android:textStyle="bold"
+                android:textColor="#4CAF50"
+                android:gravity="center" />
+
+            <TextView
+                android:id="@+id/aiConfidence"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Confidence: ---%"
+                android:textSize="14sp"
+                android:textColor="#FF9800"
+                android:gravity="center" />
+
+            <TextView
+                android:id="@+id/aiStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="AI: Initializing..."
+                android:textSize="12sp"
+                android:textColor="#888888"
+                android:gravity="center"
+                android:paddingTop="2dp" />
+        </LinearLayout>
+
+        <!-- Button Row: TCP + Camera Toggle -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:layout_marginTop="4dp">
+
+            <Button
+                android:id="@+id/button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:text="Send TCP"
+                android:textAllCaps="false" />
+
+            <Button
+                android:id="@+id/toggle_cam_button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:text="Toggle Camera"
+                android:textAllCaps="false" />
+        </LinearLayout>
+
+        <!-- AI Recognition & Face ID Row -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="4dp">
+
+            <!-- Sign Language Button -->
+            <Button
+                android:id="@+id/toggle_ai_button"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="✋ Sign Language Recognition"
+                android:textAllCaps="false" />
+
+            <!-- Face ID Button (Tap to Recognize, Long-press to Register) -->
+            <Button
+                android:id="@+id/face_id_button"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="👤 Face ID (Tap: Identify | Hold: Register)"
+                android:textAllCaps="false"
+                android:backgroundTint="#673AB7"
+                android:textColor="#FFFFFF" />
+
+            <TextView
+                android:id="@+id/faceStatusText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="Faces Enrolled: 0 | Tap: Identify | Hold: Register"
+                android:textSize="11sp"
+                android:textColor="#666666"
+                android:paddingTop="1dp" />
+
+            <!-- Object & Obstacle Detection Button -->
+            <Button
+                android:id="@+id/toggle_object_detection_button"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="👁️ Object &amp; Obstacle Detection"
+                android:textAllCaps="false"
+                android:backgroundTint="#00897B"
+                android:textColor="#FFFFFF" />
+
+            <TextView
+                android:id="@+id/objectStatusText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="Obstacle Alerts: OFF (Tap button or Double-tap glasses)"
+                android:textSize="11sp"
+                android:textColor="#666666"
+                android:paddingTop="1dp" />
+        </LinearLayout>
+
+        <!-- Camera View Area -->
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="320dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="16dp"
+            android:background="#000000">
+
+            <WebView
+                android:id="@+id/cam_view"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:visibility="gone" />
+
+            <ImageView
+                android:id="@+id/ai_camera_preview"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scaleType="fitCenter"
+                android:background="#000000" />
+        </FrameLayout>
+
     </LinearLayout>
-
-
-    <WebView
-        android:id="@+id/cam_view"
-        android:layout_width="match_parent"
-        android:layout_height="400dp"
-        android:layout_marginHorizontal="10dp"
-        android:layout_marginVertical="50dp" />
-
-</LinearLayout>
+</ScrollView>

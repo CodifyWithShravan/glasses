@@ -26,6 +26,8 @@ public class SerialScanner {
     boolean isWifiConnected = false;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private Network currentNetwork = null;
+
     // Method to initiate the dual-network state
     public void connectToEsp32(Context context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -49,27 +51,36 @@ public class SerialScanner {
                 public void onAvailable(Network network) {
                     super.onAvailable(network);
 
-                    // CRITICAL STEP: Bind this app's process to the ESP32 network
-                    connManager.bindProcessToNetwork(network);
+                    // We do NOT use bindProcessToNetwork anymore.
+                    // This allows the app to retain internet access through cellular/home wifi.
+                    // Instead, we save the network object and explicitly route ESP32 traffic through it.
+                    currentNetwork = network;
                     isWifiConnected = true;
                 }
 
                 @Override
                 public void onLost(Network network) {
                     super.onLost(network);
-                    // Unbind when disconnected to restore default OS routing
-                    connManager.bindProcessToNetwork(null);
+                    currentNetwork = null;
                     isWifiConnected = false;
                 }
             });
         }
     }
 
+    public Network getEspNetwork() {
+        return currentNetwork;
+    }
+
     public void sendTcpCommand(String command, TextView mainText) {
         executor.execute(() -> {
             try {
-                // Connect to the ESP32 IP and Port (matching your Arduino code)
-                Socket socket = new Socket("192.168.4.1", 8080);
+                Socket socket;
+                if (currentNetwork != null) {
+                    socket = currentNetwork.getSocketFactory().createSocket("192.168.4.1", 8080);
+                } else {
+                    socket = new Socket("192.168.4.1", 8080);
+                }
 
                 // Send the command string
                 OutputStream output = socket.getOutputStream();

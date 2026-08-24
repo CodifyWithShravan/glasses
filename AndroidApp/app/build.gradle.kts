@@ -37,6 +37,11 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // Prevent compression of ML model files in the APK
+    aaptOptions {
+        noCompress += listOf("tflite", "task")
+    }
 }
 
 dependencies {
@@ -50,6 +55,20 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.appcompat)
+
+    // MediaPipe Hands for hand landmark detection
+    implementation("com.google.mediapipe:tasks-vision:0.10.21")
+
+    // Google ML Kit Face Detection (bundled offline model)
+    implementation("com.google.mlkit:face-detection:16.1.6")
+
+    // Google ML Kit Object Detection (bundled offline model)
+    implementation("com.google.mlkit:object-detection:17.0.1")
+
+    // TensorFlow Lite for sign & face recognition
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

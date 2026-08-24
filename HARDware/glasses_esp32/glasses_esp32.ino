@@ -1,7 +1,9 @@
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WiFiUdp.h>
 #include "esp_camera.h"
 #include "esp_http_server.h"
+#include "driver/i2s.h"
 
 // Set your desired network name and password (password must be at least 8 characters)
 const char* ssid = "SampleESPNetwork";
@@ -10,6 +12,8 @@ const char* password = "samplepassword";
 // Create a web server listening on port 80
 WebServer server(80);
 WiFiServer tcpServer(8080);
+WiFiUDP udp;
+const int UDP_BUTTON_PORT = 8888;
 
 unsigned long previousBlinkMillis = 0;
 const unsigned long WAIT_TIME = 90000;
@@ -35,6 +39,23 @@ bool ledState = false, overheatIndicator = false;
 #define PCLK_GPIO_NUM     13
 
 #define LED_PIN 2
+
+// ─── Hardware Button Configuration (Temple Arm Button) ─────
+// Connect momentary button between GPIO 1 and GND.
+#define BUTTON_PIN 1
+
+unsigned long buttonPressStartTime = 0;
+bool buttonIsPressed = false;
+bool longPressTriggered = false;
+
+// ─── I2S Audio Configuration (MAX98357A) ───────────────────
+// NOTE: These pins must NOT conflict with the camera bus.
+#define I2S_BCLK_PIN    14   // Bit Clock
+#define I2S_LRC_PIN     21   // Left/Right Clock (Word Select)
+#define I2S_DOUT_PIN    47   // Data Out to MAX98357A DIN
+#define I2S_PORT        I2S_NUM_0
+#define AUDIO_SAMPLE_RATE  16000
+#define AUDIO_BUF_SIZE     512   // Bytes per I2S write chunk
 
 httpd_handle_t stream_httpd = NULL;
 
@@ -105,6 +126,138 @@ void startCameraServer() {
   }
 }
 
+void setupI2SAudio() {
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = AUDIO_SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = 0,
+    .dma_buf_count = 8,
+    .dma_buf_len = 256,
+    .use_apll = false,
+    .tx_desc_auto_clear = true
+  };
+
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_BCLK_PIN,
+    .ws_io_num = I2S_LRC_PIN,
+    .data_out_num = I2S_DOUT_PIN,
+    .data_in_num = I2S_PIN_NO_CHANGE
+  };
+
+  esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+  if (err != ESP_OK) {
+    Serial.printf("I2S driver install failed: 0x%x\n", err);
+    return;
+  }
+
+  err = i2s_set_pin(I2S_PORT, &pin_config);
+  if (err != ESP_OK) {
+    Serial.printf("I2S set pin failed: 0x%x\n", err);
+    return;
+  }
+
+  i2s_zero_dma_buffer(I2S_PORT);
+  Serial.println("I2S Audio initialized successfully.");
+}
+
+void handleAudioData(WiFiClient& client, long pcmLength, int sampleRate) {
+  if (pcmLength <= 0 || sampleRate <= 0) {
+    client.println("ERROR: INVALID AUDIO PARAMS");
+    return;
+  }
+  
+  i2s_set_sample_rates(I2S_PORT, sampleRate);
+  Serial.printf("Audio stream: %ld bytes @ %d Hz\n", pcmLength, sampleRate);
+  client.println("OK");
+  
+  uint8_t buffer[AUDIO_BUF_SIZE];
+  long bytesRemaining = pcmLength;
+  size_t bytesWritten;
+  
+  while (bytesRemaining > 0 && client.connected()) {
+    int toRead = min((long)AUDIO_BUF_SIZE, bytesRemaining);
+    int bytesRead = 0;
+    unsigned long readStart = millis();
+    while (bytesRead < toRead && (millis() - readStart) < 5000) {
+      if (client.available()) {
+        int chunk = client.read(buffer + bytesRead, toRead - bytesRead);
+        if (chunk > 0) bytesRead += chunk;
+      }
+    }
+    if (bytesRead > 0) {
+      i2s_write(I2S_PORT, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
+      bytesRemaining -= bytesRead;
+    } else {
+      break;
+    }
+  }
+  
+  i2s_zero_dma_buffer(I2S_PORT);
+  Serial.printf("Audio complete. %ld bytes remaining.\n", bytesRemaining);
+}
+
+unsigned long lastReleaseTime = 0;
+int tapCount = 0;
+const unsigned long DOUBLE_TAP_GAP_MS = 350;
+
+void setupButton() {
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  udp.begin(UDP_BUTTON_PORT);
+  Serial.println("Hardware button listener initialized on GPIO 1 (Single/Double/Hold)");
+}
+
+void sendButtonEvent(const char* event) {
+  IPAddress broadcastIp(192, 168, 4, 255);
+  udp.beginPacket(broadcastIp, UDP_BUTTON_PORT);
+  udp.write((const uint8_t*)event, strlen(event));
+  udp.endPacket();
+  Serial.printf("Hardware Button Event Broadcasted: %s\n", event);
+}
+
+void handleButton() {
+  int reading = digitalRead(BUTTON_PIN);
+  unsigned long now = millis();
+
+  if (reading == LOW) { // Button is pressed (active low)
+    if (!buttonIsPressed) {
+      buttonIsPressed = true;
+      buttonPressStartTime = now;
+      longPressTriggered = false;
+    } else {
+      // Long press detection (> 1000ms)
+      if (!longPressTriggered && (now - buttonPressStartTime >= 1000)) {
+        longPressTriggered = true;
+        tapCount = 0; // reset tap counter on long press
+        sendButtonEvent("HOLD");
+      }
+    }
+  } else { // Button is released
+    if (buttonIsPressed) {
+      unsigned long pressDuration = now - buttonPressStartTime;
+      if (!longPressTriggered && pressDuration >= 50 && pressDuration < 1000) {
+        tapCount++;
+        lastReleaseTime = now;
+      }
+      buttonIsPressed = false;
+      longPressTriggered = false;
+    }
+  }
+
+  // Evaluate single vs double tap after timeout
+  if (tapCount > 0 && !buttonIsPressed) {
+    if (tapCount == 1 && (now - lastReleaseTime > DOUBLE_TAP_GAP_MS)) {
+      sendButtonEvent("TAP");
+      tapCount = 0;
+    } else if (tapCount >= 2) {
+      sendButtonEvent("DOUBLE_TAP");
+      tapCount = 0;
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -158,7 +311,9 @@ void setup() {
   Serial.println("Starting Access Point...");
   WiFi.softAP(ssid, password);
 
-  //tcpServer.begin();
+  setupI2SAudio();
+  setupButton();
+  tcpServer.begin();
 
   // Retrieve and print the ESP's IP address (Usually 192.168.4.1)
   IPAddress IP = WiFi.softAPIP();
@@ -186,7 +341,11 @@ void setup() {
 
 void loop() {
   unsigned long currentMillis = millis();
-  // Continuously listen for incoming client requests
+  
+  // 1. Process hardware button presses (Single Tap / Long Press)
+  handleButton();
+
+  // 2. Continuously listen for incoming client requests
   server.handleClient();
 
   WiFiClient client = tcpServer.available();
@@ -209,6 +368,20 @@ void loop() {
           client.println("ESP32 SYSTEM OK");
         } else if(command == "SENDIMG"){
           printToSerialSize(200, client);
+        } else if (command.startsWith("AUDIO:")) {
+          // Audio streaming protocol: AUDIO:<pcm_length>:<sample_rate>
+          String audioParams = command.substring(6);
+          int colonIdx = audioParams.indexOf(':');
+          if (colonIdx > 0) {
+            long pcmLength = audioParams.substring(0, colonIdx).toInt();
+            int sampleRate = audioParams.substring(colonIdx + 1).toInt();
+            handleAudioData(client, pcmLength, sampleRate);
+          } else {
+            client.println("ERROR: INVALID AUDIO FORMAT");
+          }
+        } else if (command == "STOP_AUDIO") {
+          i2s_zero_dma_buffer(I2S_PORT);
+          client.println("AUDIO STOPPED");
         } else {
           client.println("ERROR: UNKNOWN COMMAND");
         }
