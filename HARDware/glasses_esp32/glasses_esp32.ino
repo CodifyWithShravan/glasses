@@ -16,7 +16,7 @@ WiFiUDP udp;
 const int UDP_BUTTON_PORT = 8888;
 
 unsigned long previousBlinkMillis = 0;
-const unsigned long WAIT_TIME = 90000;
+const unsigned long WAIT_TIME = 180000;
 unsigned long BLINK_INTERVAL = 350;
 
 bool ledState = false, overheatIndicator = false;
