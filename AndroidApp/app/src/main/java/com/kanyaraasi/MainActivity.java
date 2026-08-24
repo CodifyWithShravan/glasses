@@ -343,16 +343,6 @@ public class MainActivity extends AppCompatActivity{
             toggleAiButton.setText("\uD83E\uDD16 Enable AI Recognition");
             aiStatusPanel.setVisibility(View.GONE);
 
-            // Stop the AI-enabled stream parser
-            if (mjpegStreamParser != null) {
-                mjpegStreamParser.stop();
-                mjpegStreamParser = null;
-            }
-            camIsActive = false;
-            
-            // Restart normal camera feed
-            toggleCamera();
-
             aiSignLabel.setText("Sign: ---");
             aiConfidence.setText("Confidence: ---%");
             aiStatus.setText("AI: Disabled");
@@ -368,43 +358,9 @@ public class MainActivity extends AppCompatActivity{
             aiEnabled = true;
             toggleAiButton.setText("\uD83D\uDED1 Disable AI Recognition");
             aiStatusPanel.setVisibility(View.VISIBLE);
-            aiStatus.setText("AI: Starting stream parser...");
-
-            // Stop normal camera feed first
-            if (mjpegStreamParser != null) {
-                mjpegStreamParser.stop();
-                mjpegStreamParser = null;
-            }
-            camIsActive = false;
-
-            // Create and start the MJPEG stream parser, passing the specific ESP32 network
-            mjpegStreamParser = new MjpegStreamParser(STREAM_URL, serialScanner.getEspNetwork());
-            
-            // Set listener to update the ImageView on every frame
-            mjpegStreamParser.setDisplayListener(new MjpegStreamParser.OnFrameDisplayListener() {
-                @Override
-                public void onFrameForDisplay(Bitmap frame) {
-                    latestCameraFrame = frame;
-                    runOnUiThread(() -> {
-                        if (aiEnabled && frame != null) {
-                            aiCameraPreview.setImageBitmap(frame);
-                        }
-                    });
-                }
-            });
-
-            // Set listener to run AI processing on every Nth frame
-            mjpegStreamParser.setProcessListener(new MjpegStreamParser.OnFrameProcessListener() {
-                @Override
-                public void onFrameForProcessing(Bitmap frame) {
-                    processFrameForAI(frame);
-                }
-            });
-            mjpegStreamParser.setProcessEveryN(1); // Process frames immediately with zero wait
-            
-            mjpegStreamParser.start();
-
             aiStatus.setText("AI: Scanning for hand signs...");
+
+            ensureStreamRunning();
             Log.d(TAG, "AI recognition enabled");
         }
     }
@@ -783,12 +739,9 @@ public class MainActivity extends AppCompatActivity{
             return;
         }
 
-        if (serialScanner.getEspNetwork() == null) {
-            Log.w(TAG, "Cannot start camera: ESP32 network not ready");
-            return;
-        }
+        android.net.Network network = (serialScanner != null) ? serialScanner.getEspNetwork() : null;
 
-        mjpegStreamParser = new MjpegStreamParser(STREAM_URL, serialScanner.getEspNetwork());
+        mjpegStreamParser = new MjpegStreamParser(STREAM_URL, network);
         mjpegStreamParser.setDisplayListener(frame -> {
             latestCameraFrame = frame;
             runOnUiThread(() -> {

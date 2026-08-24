@@ -65,11 +65,8 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   esp_err_t res = ESP_OK;
   char part_buf[64];
 
-  digitalWrite(LED_PIN, HIGH);
-
   res = httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
   if (res != ESP_OK) {
-    digitalWrite(LED_PIN, LOW);
     return res;
   }
 
@@ -99,7 +96,6 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     }
   }
 
-  digitalWrite(LED_PIN, LOW);
   return res;
 }
 
@@ -375,7 +371,7 @@ void setup() {
     s->set_aec2(s, 1);           // Enable DSP Auto Exposure algorithm
     s->set_ae_level(s, -1);      // Lower exposure level to prevent blown-out highlights
     s->set_gain_ctrl(s, 1);      // Auto Gain
-    s->set_gainceiling(s, GAINCEILING_2X); // Clamp gain ceiling to 2x (prevents amplifying high-frequency noise lines)
+    s->set_gainceiling(s, (gainceiling_t)0); // Clamp gain ceiling to 2x (prevents amplifying high-frequency noise lines)
     s->set_bpc(s, 1);            // Black Pixel Correction (cleans sensor lines)
     s->set_wpc(s, 1);            // White Pixel Correction (cleans sensor lines)
     s->set_raw_gma(s, 1);        // Gamma Correction
