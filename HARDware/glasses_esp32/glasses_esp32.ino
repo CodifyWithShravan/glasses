@@ -16,7 +16,7 @@ WiFiUDP udp;
 const int UDP_BUTTON_PORT = 8888;
 
 unsigned long previousBlinkMillis = 0;
-const unsigned long WAIT_TIME = 180000;
+const unsigned long WAIT_TIME = 90000;
 unsigned long BLINK_INTERVAL = 350;
 
 bool ledState = false, overheatIndicator = false;
@@ -41,16 +41,16 @@ bool ledState = false, overheatIndicator = false;
 #define LED_PIN 2
 
 // ─── Hardware Button Configuration (Temple Arm Button) ─────
-// Connect momentary 4-pin switch between GPIO 19 and GND.
-#define BUTTON_PIN 19
+// Connect momentary button between GPIO 1 and GND.
+#define BUTTON_PIN 1
 
 unsigned long buttonPressStartTime = 0;
 bool buttonIsPressed = false;
 bool longPressTriggered = false;
 
 // ─── I2S Audio Configuration (MAX98357A) ───────────────────
-// GPIO 41 used for BCLK (GPIO 48 is onboard RGB LED and caused blinding light + lag)
-#define I2S_BCLK_PIN    41   // Bit Clock (Connect to Pin 41 on right header)
+// NOTE: These pins must NOT conflict with the camera bus.
+#define I2S_BCLK_PIN    14   // Bit Clock
 #define I2S_LRC_PIN     21   // Left/Right Clock (Word Select)
 #define I2S_DOUT_PIN    47   // Data Out to MAX98357A DIN
 #define I2S_PORT        I2S_NUM_0
@@ -65,36 +65,47 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   esp_err_t res = ESP_OK;
   char part_buf[64];
 
-  res = httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
-  if (res != ESP_OK) {
-    return res;
+  // 1. WAKE UP the camera sensor when a viewer connects
+  digitalWrite(LED_PIN, HIGH);
+  pinMode(PWDN_GPIO_NUM, OUTPUT);
+  digitalWrite(PWDN_GPIO_NUM, LOW);
+  //esp_camera_init(&config);
+  sensor_t * s = esp_camera_sensor_get();
+  if (s) {
+    s->set_reg(s, 0x09, 0x01, 0x00); // Clear standby bit (Wake up)
   }
 
-  while (true) {
+  res = httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
+  if(res != ESP_OK) return res;
+
+  while(true) {
     fb = esp_camera_fb_get();
     if (!fb) {
-      Serial.println("Camera capture failed, retrying...");
-      vTaskDelay(pdMS_TO_TICKS(10));
-      continue;
-    }
-
-    if (fb->format != PIXFORMAT_JPEG) {
+      Serial.println("Camera capture failed");
+      res = ESP_FAIL;
+    } else {
+      if(fb->format != PIXFORMAT_JPEG) {
+        res = ESP_FAIL;
+      } else {
+        size_t hlen = snprintf(part_buf, 64, "\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
+        res = httpd_resp_send_chunk(req, part_buf, hlen);
+        if(res == ESP_OK) {
+          res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+        }
+      }
       esp_camera_fb_return(fb);
-      vTaskDelay(pdMS_TO_TICKS(10));
-      continue;
-    }
-
-    size_t hlen = snprintf(part_buf, 64, "\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
-    res = httpd_resp_send_chunk(req, part_buf, hlen);
-    if (res == ESP_OK) {
-      res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
-    }
-
-    esp_camera_fb_return(fb);
-    if (res != ESP_OK) {
-      break; // Client disconnected
+      if(res != ESP_OK) break; // Client disconnected!
     }
   }
+
+  // 2. PUT SENSOR TO SLEEP when the connection drops or the browser closes
+  if (s) {
+    s->set_reg(s, 0x09, 0x01, 0x10); // Set standby bit (Power down internal die)
+  }
+
+  digitalWrite(LED_PIN, LOW);
+  pinMode(PWDN_GPIO_NUM, OUTPUT);
+  digitalWrite(PWDN_GPIO_NUM, HIGH);
 
   return res;
 }
@@ -102,11 +113,6 @@ static esp_err_t stream_handler(httpd_req_t *req) {
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 81; // Running stream on Port 81
-  config.ctrl_port = 32768;
-  config.max_open_sockets = 4;
-  config.lru_purge_enable = true;
-  config.task_priority = tskIDLE_PRIORITY + 5; // High priority task for stream handling
-  config.stack_size = 8192;                    // 8 KB stack for robust JPEG packet handling
 
   httpd_uri_t stream_uri = {
     .uri       = "/stream",
@@ -117,52 +123,7 @@ void startCameraServer() {
 
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(stream_httpd, &stream_uri);
-    Serial.println("Camera Stream Server active on port 81 (/stream)");
   }
-}
-
-// ─── Continuous Idle Sine Wave Generator ────────────────────
-#define ENABLE_IDLE_SINE_WAVE  false // Set false to eliminate Class-D electrical switching noise on camera 3.3V rail
-#define SINE_FREQ_HZ           440   // 440 Hz (Standard A note)
-#define SINE_AMPLITUDE         2500  // Clean, comfortable tone (out of 32767)
-
-// ─── Speaker Protection & Volume Scaling ────────────────────
-// MAX98357A on 3.3V into 8Ω delivers max ~0.56W at 0 dBFS.
-// 0.70 scaling limits max output power to ~0.28W, keeping the 0.5W
-// voice coil cool, safe, and distortion-free.
-#define AUDIO_VOLUME_SCALE 0.70f
-
-int16_t sineWaveCycle[64];
-int sineCycleLength = 0;
-int sinePhaseIndex = 0;
-volatile bool isPlayingTTS = false;
-
-void initSineWave() {
-#if ENABLE_IDLE_SINE_WAVE
-  sineCycleLength = AUDIO_SAMPLE_RATE / SINE_FREQ_HZ;
-  if (sineCycleLength > 64) sineCycleLength = 64;
-  for (int i = 0; i < sineCycleLength; i++) {
-    sineWaveCycle[i] = (int16_t)(sin(2.0 * PI * i / sineCycleLength) * SINE_AMPLITUDE);
-  }
-  Serial.printf("Sine wave generator initialized (%d Hz @ %d Hz sample rate, Safe Power Mode)\n", SINE_FREQ_HZ, AUDIO_SAMPLE_RATE);
-#endif
-}
-
-void playIdleSineWave() {
-#if ENABLE_IDLE_SINE_WAVE
-  if (isPlayingTTS) return;
-
-  // Generate a small chunk of 64 samples (128 bytes)
-  int16_t buffer[64];
-  for (int i = 0; i < 64; i++) {
-    buffer[i] = sineWaveCycle[sinePhaseIndex];
-    sinePhaseIndex = (sinePhaseIndex + 1) % sineCycleLength;
-  }
-
-  size_t bytesWritten = 0;
-  // Non-blocking quick DMA write (10ms timeout)
-  i2s_write(I2S_PORT, (const char*)buffer, sizeof(buffer), &bytesWritten, 10);
-#endif
 }
 
 void setupI2SAudio() {
@@ -199,7 +160,6 @@ void setupI2SAudio() {
   }
 
   i2s_zero_dma_buffer(I2S_PORT);
-  initSineWave();
   Serial.println("I2S Audio initialized successfully.");
 }
 
@@ -209,13 +169,8 @@ void handleAudioData(WiFiClient& client, long pcmLength, int sampleRate) {
     return;
   }
   
-  // 1. Immediately pause the idle sine wave
-  isPlayingTTS = true;
-  i2s_zero_dma_buffer(I2S_PORT);
-
-  // 2. Set sample rate for incoming TTS
   i2s_set_sample_rates(I2S_PORT, sampleRate);
-  Serial.printf("Audio stream (TTS): %ld bytes @ %d Hz (Scaled 0.70x for 8Ω 0.5W speaker)\n", pcmLength, sampleRate);
+  Serial.printf("Audio stream: %ld bytes @ %d Hz\n", pcmLength, sampleRate);
   client.println("OK");
   
   uint8_t buffer[AUDIO_BUF_SIZE];
@@ -233,13 +188,6 @@ void handleAudioData(WiFiClient& client, long pcmLength, int sampleRate) {
       }
     }
     if (bytesRead > 0) {
-      // Scale 16-bit PCM samples to safe output power for 8Ω 0.5W speaker
-      int16_t* samples = (int16_t*)buffer;
-      int sampleCount = bytesRead / 2;
-      for (int i = 0; i < sampleCount; i++) {
-        samples[i] = (int16_t)(samples[i] * AUDIO_VOLUME_SCALE);
-      }
-
       i2s_write(I2S_PORT, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
       bytesRemaining -= bytesRead;
     } else {
@@ -247,13 +195,8 @@ void handleAudioData(WiFiClient& client, long pcmLength, int sampleRate) {
     }
   }
   
-  // 3. Clear DMA buffer & restore default sample rate for idle sine wave
   i2s_zero_dma_buffer(I2S_PORT);
-  i2s_set_sample_rates(I2S_PORT, AUDIO_SAMPLE_RATE);
-  Serial.printf("TTS complete. Resuming idle sine wave.\n");
-
-  // 4. Resume idle sine wave
-  isPlayingTTS = false;
+  Serial.printf("Audio complete. %ld bytes remaining.\n", bytesRemaining);
 }
 
 unsigned long lastReleaseTime = 0;
@@ -263,7 +206,7 @@ const unsigned long DOUBLE_TAP_GAP_MS = 350;
 void setupButton() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   udp.begin(UDP_BUTTON_PORT);
-  Serial.printf("Hardware button listener initialized on GPIO %d (Single/Double/Hold)\n", BUTTON_PIN);
+  Serial.println("Hardware button listener initialized on GPIO 1 (Single/Double/Hold)");
 }
 
 void sendButtonEvent(const char* event) {
@@ -337,18 +280,18 @@ void setup() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000; // 20 MHz clean pixel clock (eliminates horizontal scan lines)
+  config.xclk_freq_hz = 10000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
-  // Utilize PSRAM if available for smooth double buffering
+  // Utilize PSRAM if available for double buffering
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_QVGA; // 320x240 (ultra smooth, high FPS, zero Wi-Fi drops)
-    config.jpeg_quality = 12;          // High clarity
+    config.frame_size = FRAMESIZE_VGA; // 640x480
+    config.jpeg_quality = 15;          // 1-63 (lower means higher quality)
     config.fb_count = 2;
     config.grab_mode = CAMERA_GRAB_LATEST;
   } else {
-    config.frame_size = FRAMESIZE_QVGA;
-    config.jpeg_quality = 12;
+    config.frame_size = FRAMESIZE_QVGA; // 320x240
+    config.jpeg_quality = 15;
     config.fb_count = 1;
   }
 
@@ -361,35 +304,12 @@ void setup() {
     return;
   }
 
-  // Sensor Register Tuning: Eliminate horizontal scan lines and color artifacts
-  sensor_t * s = esp_camera_sensor_get();
-  if (s) {
-    s->set_brightness(s, 0);
-    s->set_contrast(s, 0);
-    s->set_saturation(s, 0);
-    s->set_whitebal(s, 1);       // Auto White Balance
-    s->set_awb_gain(s, 1);
-    s->set_wb_mode(s, 0);
-    s->set_exposure_ctrl(s, 1);  // Auto Exposure
-    s->set_aec2(s, 1);           // Enable DSP Auto Exposure algorithm
-    s->set_ae_level(s, -1);      // Lower exposure level to prevent blown-out highlights
-    s->set_gain_ctrl(s, 1);      // Auto Gain
-    s->set_gainceiling(s, (gainceiling_t)0); // Clamp gain ceiling to 2x (prevents amplifying high-frequency noise lines)
-    s->set_bpc(s, 1);            // Black Pixel Correction (cleans sensor lines)
-    s->set_wpc(s, 1);            // White Pixel Correction (cleans sensor lines)
-    s->set_raw_gma(s, 1);        // Gamma Correction
-    s->set_lenc(s, 1);           // Lens Correction
-    s->set_dcw(s, 1);            // Downsize Compensation (cleans horizontal banding)
-  }
-
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  // Set the ESP to act as a Wi-Fi Access Point with maximum RF power
+  // Set the ESP to act as a Wi-Fi Access Point
   Serial.println("Starting Access Point...");
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(ssid, password, 1, 0, 4);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  WiFi.softAP(ssid, password);
 
   setupI2SAudio();
   setupButton();
@@ -422,13 +342,10 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
   
-  // 1. Process hardware button presses (Single Tap / Double Tap / Long Press)
+  // 1. Process hardware button presses (Single Tap / Long Press)
   handleButton();
 
-  // 2. Play continuous idle sine wave through speaker when speaker is free
-  playIdleSineWave();
-
-  // 3. Continuously listen for incoming client requests
+  // 2. Continuously listen for incoming client requests
   server.handleClient();
 
   WiFiClient client = tcpServer.available();
@@ -437,9 +354,6 @@ void loop() {
     
     // Keep the connection alive as long as the client is connected
     while (client.connected()) {
-      handleButton();
-      playIdleSineWave();
-
       if (client.available()) {
         // Read the incoming TCP packet until a newline character
         String command = client.readStringUntil('\n'); 
