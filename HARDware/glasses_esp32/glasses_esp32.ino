@@ -5,6 +5,8 @@
 #include "esp_http_server.h"
 #include "esp_wifi.h"
 #include "esp_heap_caps.h"
+#include <lwip/sockets.h>
+#include <lwip/netdb.h>
 #include "driver/i2s.h"
 
 // Set your desired network name and password (password must be at least 8 characters)
@@ -69,6 +71,15 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   camera_fb_t * fb = NULL;
   esp_err_t res = ESP_OK;
   char part_buf[64];
+
+  // Disable TCP Nagle's algorithm & enlarge send buffer on stream socket to eliminate packet delay
+  int sockfd = httpd_req_to_sockfd(req);
+  if (sockfd >= 0) {
+    int nodelay = 1;
+    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    int sndbuf = 32768;
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+  }
 
   // 1. WAKE UP the camera sensor when a viewer connects
   digitalWrite(LED_PIN, HIGH);
@@ -321,12 +332,12 @@ void setup() {
   config.xclk_freq_hz = 20000000; // 20 MHz for full 25-30 FPS streaming
   config.pixel_format = PIXFORMAT_JPEG;
 
-  // Utilize PSRAM if available for double buffering & high FPS
+  // Utilize PSRAM if available for triple buffering & high FPS
   if (psramFound()) {
     Serial.printf("PSRAM: ENABLED (Free PSRAM: %d bytes)\n", ESP.getFreePsram());
     config.frame_size = FRAMESIZE_VGA; // 640x480
     config.jpeg_quality = 12;          // 12 for high quality and small payload (~18KB)
-    config.fb_count = 2;               // Double buffer
+    config.fb_count = 3;               // Triple buffer for seamless DMA pipelining
     config.grab_mode = CAMERA_GRAB_LATEST; // Always fetch freshest frame
   } else {
     Serial.println("WARNING: PSRAM NOT FOUND! Falling back to SRAM mode.");
@@ -346,26 +357,27 @@ void setup() {
     return;
   }
 
-  // Sensor optimizations for low latency and sharp imaging
+  // Sensor optimizations for low latency, high FPS, and fast shutter speed
   sensor_t * s = esp_camera_sensor_get();
   if (s) {
     s->set_vflip(s, 0);
     s->set_hmirror(s, 0);
-    s->set_brightness(s, 1);
-    s->set_contrast(s, 1);
+    s->set_brightness(s, 0);
+    s->set_contrast(s, 0);
     s->set_saturation(s, 0);
     s->set_special_effect(s, 0);
-    s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 1);
+    s->set_whitebal(s, 1);       // Enable Auto White Balance
+    s->set_awb_gain(s, 1);       // Auto White Balance Gain
     s->set_wb_mode(s, 0);
-    s->set_exposure_ctrl(s, 1);
-    s->set_aec2(s, 1);
-    s->set_gain_ctrl(s, 1);
-    s->set_gainceiling(s, (gainceiling_t)2);
-    s->set_bpc(s, 1);
+    s->set_exposure_ctrl(s, 1);  // Auto Exposure
+    s->set_aec2(s, 0);           // Disable DSP AEC2 (DSP AEC2 causes slow FPS fluctuations)
+    s->set_ae_level(s, 0);
+    s->set_gain_ctrl(s, 1);      // Auto Gain Control
+    s->set_gainceiling(s, (gainceiling_t)GAINCEILING_8X); // 8x Gain Ceiling allows 25-30 FPS shutter speed indoors
+    s->set_bpc(s, 0);
     s->set_wpc(s, 1);
     s->set_raw_gma(s, 1);
-    s->set_lenc(s, 1);
+    s->set_lenc(s, 0);
   }
 
   pinMode(LED_PIN, OUTPUT);
