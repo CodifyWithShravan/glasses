@@ -114,6 +114,9 @@ public class MjpegStreamParser {
     }
 
     private void parseStream() {
+        byte[] readBuffer = new byte[65536];
+        ByteArrayOutputStream headerBuffer = new ByteArrayOutputStream(256);
+
         while (isRunning) {
             HttpURLConnection connection = null;
             InputStream inputStream = null;
@@ -127,6 +130,8 @@ public class MjpegStreamParser {
                 }
                 connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
                 connection.setReadTimeout(READ_TIMEOUT_MS);
+                connection.setUseCaches(false);
+                connection.setRequestProperty("Connection", "Keep-Alive");
                 connection.connect();
 
                 int responseCode = connection.getResponseCode();
@@ -137,12 +142,12 @@ public class MjpegStreamParser {
                 }
 
                 Log.d(TAG, "Connected! Content-Type: " + connection.getContentType());
-                inputStream = new BufferedInputStream(connection.getInputStream(), 16384);
+                inputStream = new BufferedInputStream(connection.getInputStream(), 65536);
                 int frameCount = 0;
 
                 while (isRunning) {
                     // Read the multipart header until \r\n\r\n
-                    String header = readHeader(inputStream);
+                    String header = readHeader(inputStream, headerBuffer);
                     if (header == null) {
                         Log.w(TAG, "Stream ended (null header)");
                         break;
@@ -151,11 +156,14 @@ public class MjpegStreamParser {
                     int contentLength = parseContentLength(header);
 
                     if (contentLength > 0) {
-                        // Read the JPEG payload
-                        byte[] jpegData = new byte[contentLength];
+                        // Ensure readBuffer is large enough
+                        if (readBuffer.length < contentLength) {
+                            readBuffer = new byte[contentLength + 8192];
+                        }
+
                         int bytesRead = 0;
-                        while (bytesRead < contentLength) {
-                            int read = inputStream.read(jpegData, bytesRead, contentLength - bytesRead);
+                        while (bytesRead < contentLength && isRunning) {
+                            int read = inputStream.read(readBuffer, bytesRead, contentLength - bytesRead);
                             if (read == -1) {
                                 break;
                             }
@@ -165,8 +173,10 @@ public class MjpegStreamParser {
                         if (bytesRead == contentLength) {
                             frameCount++;
                             BitmapFactory.Options options = new BitmapFactory.Options();
-                            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-                            Bitmap bitmap = BitmapFactory.decodeByteArray(jpegData, 0, contentLength, options);
+                            options.inPreferredConfig = Bitmap.Config.RGB_565; // 50% less RAM, faster decode
+                            options.inSampleSize = 1;
+                            Bitmap bitmap = BitmapFactory.decodeByteArray(readBuffer, 0, contentLength, options);
+                            
                             if (bitmap != null) {
                                 // Send EVERY frame for display (camera preview)
                                 if (displayListener != null) {
@@ -175,12 +185,9 @@ public class MjpegStreamParser {
 
                                 // Send every Nth frame for AI processing
                                 if (processListener != null && frameCount % processEveryN == 0) {
-                                    // Create an ARGB_8888 copy for AI processing
                                     Bitmap processCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false);
                                     if (processCopy != null) {
                                         processListener.onFrameForProcessing(processCopy);
-                                    } else {
-                                        Log.w(TAG, "Failed to copy bitmap for processing");
                                     }
                                 }
                             } else {
@@ -191,10 +198,8 @@ public class MjpegStreamParser {
                             break;
                         }
                     } else if (contentLength == 0) {
-                        // Skip empty frames
                         continue;
                     }
-                    // If contentLength is -1 (not found in header), try reading until next boundary
                 }
 
             } catch (Exception e) {
@@ -226,14 +231,16 @@ public class MjpegStreamParser {
      * Parse Content-Length from the multipart header.
      */
     private int parseContentLength(String header) {
-        String[] lines = header.split("\\r?\\n");
-        for (String line : lines) {
-            if (line.toLowerCase().startsWith("content-length:")) {
-                try {
-                    return Integer.parseInt(line.substring(line.indexOf(":") + 1).trim());
-                } catch (NumberFormatException e) {
-                    Log.e(TAG, "Failed to parse content length from: " + line, e);
-                }
+        int idx = header.toLowerCase().indexOf("content-length:");
+        if (idx != -1) {
+            int start = idx + 15;
+            int end = header.indexOf("\r\n", start);
+            if (end == -1) end = header.indexOf("\n", start);
+            if (end == -1) end = header.length();
+            try {
+                return Integer.parseInt(header.substring(start, end).trim());
+            } catch (NumberFormatException e) {
+                Log.e(TAG, "Failed to parse content length from: " + header, e);
             }
         }
         return -1;
@@ -243,8 +250,8 @@ public class MjpegStreamParser {
      * Reads bytes from the stream until a double CRLF (\r\n\r\n) is found,
      * which marks the end of a multipart header section.
      */
-    private String readHeader(InputStream inputStream) throws IOException {
-        ByteArrayOutputStream headerBuffer = new ByteArrayOutputStream();
+    private String readHeader(InputStream inputStream, ByteArrayOutputStream headerBuffer) throws IOException {
+        headerBuffer.reset();
         int prevChar = -1;
         int currChar;
         int crlfCount = 0;

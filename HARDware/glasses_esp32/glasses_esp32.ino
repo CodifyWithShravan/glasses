@@ -3,6 +3,7 @@
 #include <WiFiUdp.h>
 #include "esp_camera.h"
 #include "esp_http_server.h"
+#include "esp_wifi.h"
 #include "driver/i2s.h"
 
 // Set your desired network name and password (password must be at least 8 characters)
@@ -67,34 +68,48 @@ static esp_err_t stream_handler(httpd_req_t *req) {
 
   // 1. WAKE UP the camera sensor when a viewer connects
   digitalWrite(LED_PIN, HIGH);
-  pinMode(PWDN_GPIO_NUM, OUTPUT);
-  digitalWrite(PWDN_GPIO_NUM, LOW);
-  //esp_camera_init(&config);
+  if (PWDN_GPIO_NUM != -1) {
+    pinMode(PWDN_GPIO_NUM, OUTPUT);
+    digitalWrite(PWDN_GPIO_NUM, LOW);
+  }
   sensor_t * s = esp_camera_sensor_get();
   if (s) {
     s->set_reg(s, 0x09, 0x01, 0x00); // Clear standby bit (Wake up)
   }
 
   res = httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
-  if(res != ESP_OK) return res;
+  if (res != ESP_OK) {
+    digitalWrite(LED_PIN, LOW);
+    return res;
+  }
 
-  while(true) {
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "X-Framerate", "30");
+
+  while (true) {
     fb = esp_camera_fb_get();
     if (!fb) {
-      Serial.println("Camera capture failed");
-      res = ESP_FAIL;
-    } else {
-      if(fb->format != PIXFORMAT_JPEG) {
-        res = ESP_FAIL;
-      } else {
-        size_t hlen = snprintf(part_buf, 64, "\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
-        res = httpd_resp_send_chunk(req, part_buf, hlen);
-        if(res == ESP_OK) {
-          res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
-        }
-      }
+      // Don't kill the stream connection on a single transient frame drop!
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+
+    if (fb->format != PIXFORMAT_JPEG) {
       esp_camera_fb_return(fb);
-      if(res != ESP_OK) break; // Client disconnected!
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+
+    size_t hlen = snprintf(part_buf, 64, "\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
+    res = httpd_resp_send_chunk(req, part_buf, hlen);
+    if (res == ESP_OK) {
+      res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+    }
+    esp_camera_fb_return(fb);
+
+    if (res != ESP_OK) {
+      // Client disconnected
+      break;
     }
   }
 
@@ -104,15 +119,23 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   }
 
   digitalWrite(LED_PIN, LOW);
-  pinMode(PWDN_GPIO_NUM, OUTPUT);
-  digitalWrite(PWDN_GPIO_NUM, HIGH);
+  if (PWDN_GPIO_NUM != -1) {
+    pinMode(PWDN_GPIO_NUM, OUTPUT);
+    digitalWrite(PWDN_GPIO_NUM, HIGH);
+  }
 
   return res;
 }
 
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.server_port = 81; // Running stream on Port 81
+  config.server_port = 81;                     // Running stream on Port 81
+  config.ctrl_port = 32768;
+  config.max_open_sockets = 4;
+  config.lru_purge_enable = true;
+  config.task_priority = tskIDLE_PRIORITY + 5; // High priority stream task
+  config.stack_size = 8192;                    // 8KB stack for robust networking
+  config.core_id = 0;                          // Core 0 handles network tasks
 
   httpd_uri_t stream_uri = {
     .uri       = "/stream",
@@ -123,6 +146,7 @@ void startCameraServer() {
 
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(stream_httpd, &stream_uri);
+    Serial.println("Camera Stream Server active on port 81 (/stream)");
   }
 }
 
@@ -260,6 +284,13 @@ void handleButton() {
 
 void setup() {
   Serial.begin(115200);
+  delay(500);
+
+  Serial.println("\n==========================================");
+  Serial.println("   ESP32-S3 Smart Glasses Firmware Boot   ");
+  Serial.println("==========================================");
+  Serial.printf("CPU Frequency: %d MHz\n", getCpuFreqMHz());
+  Serial.printf("Internal Free Heap: %d bytes\n", ESP.getFreeHeap());
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -280,19 +311,23 @@ void setup() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 10000000;
+  config.xclk_freq_hz = 20000000; // 20 MHz for full 25-30 FPS streaming
   config.pixel_format = PIXFORMAT_JPEG;
 
-  // Utilize PSRAM if available for double buffering
+  // Utilize PSRAM if available for double buffering & high FPS
   if (psramFound()) {
+    Serial.printf("PSRAM: ENABLED (Free PSRAM: %d bytes)\n", ESP.getFreePsram());
     config.frame_size = FRAMESIZE_VGA; // 640x480
-    config.jpeg_quality = 15;          // 1-63 (lower means higher quality)
-    config.fb_count = 2;
-    config.grab_mode = CAMERA_GRAB_LATEST;
+    config.jpeg_quality = 12;          // 12 for high quality and small payload (~18KB)
+    config.fb_count = 2;               // Double buffer
+    config.grab_mode = CAMERA_GRAB_LATEST; // Always fetch freshest frame
   } else {
+    Serial.println("WARNING: PSRAM NOT FOUND! Falling back to SRAM mode.");
+    Serial.println("To fix: in Arduino IDE, select Tools -> PSRAM: 'OPI PSRAM'");
     config.frame_size = FRAMESIZE_QVGA; // 320x240
     config.jpeg_quality = 15;
     config.fb_count = 1;
+    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   }
 
   neopixelWrite(RGB_BUILTIN, 0, 0, 0);
@@ -304,12 +339,38 @@ void setup() {
     return;
   }
 
+  // Sensor optimizations for low latency and sharp imaging
+  sensor_t * s = esp_camera_sensor_get();
+  if (s) {
+    s->set_vflip(s, 0);
+    s->set_hmirror(s, 0);
+    s->set_brightness(s, 1);
+    s->set_contrast(s, 1);
+    s->set_saturation(s, 0);
+    s->set_special_effect(s, 0);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_wb_mode(s, 0);
+    s->set_exposure_ctrl(s, 1);
+    s->set_aec2(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_gainceiling(s, (gainceiling_t)2);
+    s->set_bpc(s, 1);
+    s->set_wpc(s, 1);
+    s->set_raw_gma(s, 1);
+    s->set_lenc(s, 1);
+  }
+
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  // Set the ESP to act as a Wi-Fi Access Point
-  Serial.println("Starting Access Point...");
-  WiFi.softAP(ssid, password);
+  // Configure Wi-Fi Access Point with Zero Power-Save & Max RF Power
+  Serial.println("Configuring Wi-Fi Access Point (Low-Latency Mode)...");
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password, 1, 0, 4); // Channel 1, max 4 clients
+  WiFi.setSleep(false);                 // Disable modem-sleep to eliminate 100-300ms latency spikes
+  esp_wifi_set_ps(WIFI_PS_NONE);       // Enforce no power saving at hardware driver level
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);  // Maximum RF power for strong RSSI
 
   setupI2SAudio();
   setupButton();
@@ -348,28 +409,23 @@ void loop() {
   // 2. Continuously listen for incoming client requests
   server.handleClient();
 
+  // 3. Non-blocking TCP Command handling
   WiFiClient client = tcpServer.available();
   if (client) {
-    Serial.println("New TCP Client Connected!");
-    
-    // Keep the connection alive as long as the client is connected
-    while (client.connected()) {
-      if (client.available()) {
-        // Read the incoming TCP packet until a newline character
-        String command = client.readStringUntil('\n'); 
-        command.trim(); // Clean up trailing \r or \n
+    if (client.available()) {
+      String command = client.readStringUntil('\n');
+      command.trim();
+      
+      if (command.length() > 0) {
+        Serial.println("Received TCP command: " + command);
         
-        Serial.println("Received command: " + command);
-        
-        // Simple command handling logic
         if (command == "PING") {
           client.println("PONG");
         } else if (command == "STATUS") {
           client.println("ESP32 SYSTEM OK");
-        } else if(command == "SENDIMG"){
+        } else if (command == "SENDIMG") {
           printToSerialSize(200, client);
         } else if (command.startsWith("AUDIO:")) {
-          // Audio streaming protocol: AUDIO:<pcm_length>:<sample_rate>
           String audioParams = command.substring(6);
           int colonIdx = audioParams.indexOf(':');
           if (colonIdx > 0) {
@@ -387,22 +443,18 @@ void loop() {
         }
       }
     }
-    // Close the connection when the client disconnects
-    client.stop();
-    Serial.println("Client Disconnected.");
   }
 
   if (currentMillis >= WAIT_TIME) {
-
-    // 2. Non-blocking blink timer
+    // Non-blocking blink timer
     if (currentMillis - previousBlinkMillis >= BLINK_INTERVAL) {
       previousBlinkMillis = currentMillis;
       ledState = !ledState; // Toggle ON/OFF state
 
       if (ledState) {
-        neopixelWrite(RGB_BUILTIN, RGB_BRIGHTNESS, 0, 0); // GREEN (R, G, B)
+        neopixelWrite(RGB_BUILTIN, 16, 0, 0); // Mild indicator
       } else {
-        neopixelWrite(RGB_BUILTIN, 0, 0, 0);             // OFF
+        neopixelWrite(RGB_BUILTIN, 0, 0, 0);  // OFF
       }
     }
   }

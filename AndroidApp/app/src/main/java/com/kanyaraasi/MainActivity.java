@@ -400,7 +400,7 @@ public class MainActivity extends AppCompatActivity{
                     processFrameForAI(frame);
                 }
             });
-            mjpegStreamParser.setProcessEveryN(1); // Process frames immediately with zero wait
+            mjpegStreamParser.setProcessEveryN(3); // Decouple AI inference from camera display for smooth 30 FPS
             
             mjpegStreamParser.start();
 
@@ -798,7 +798,7 @@ public class MainActivity extends AppCompatActivity{
             });
         });
         mjpegStreamParser.setProcessListener(this::processFrameForAI);
-        mjpegStreamParser.setProcessEveryN(1);
+        mjpegStreamParser.setProcessEveryN(3); // Decouple AI inference from camera display for smooth 30 FPS
         mjpegStreamParser.start();
         camIsActive = true;
     }
