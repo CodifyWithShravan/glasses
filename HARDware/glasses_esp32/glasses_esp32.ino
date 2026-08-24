@@ -49,8 +49,8 @@ bool buttonIsPressed = false;
 bool longPressTriggered = false;
 
 // ─── I2S Audio Configuration (MAX98357A) ───────────────────
-// Configured for user's available soldering pins: 48, 21, 47
-#define I2S_BCLK_PIN    48   // Bit Clock
+// GPIO 41 used for BCLK (GPIO 48 is onboard RGB LED and caused blinding light + lag)
+#define I2S_BCLK_PIN    41   // Bit Clock (Connect to Pin 41 on right header)
 #define I2S_LRC_PIN     21   // Left/Right Clock (Word Select)
 #define I2S_DOUT_PIN    47   // Data Out to MAX98357A DIN
 #define I2S_PORT        I2S_NUM_0
@@ -126,6 +126,39 @@ void startCameraServer() {
   }
 }
 
+// ─── Continuous Idle Sine Wave Generator ────────────────────
+#define SINE_FREQ_HZ       440   // 440 Hz (Standard A note)
+#define SINE_AMPLITUDE     3500  // Clear, pleasant volume (out of 32767)
+
+int16_t sineWaveCycle[64];
+int sineCycleLength = 0;
+int sinePhaseIndex = 0;
+volatile bool isPlayingTTS = false;
+
+void initSineWave() {
+  sineCycleLength = AUDIO_SAMPLE_RATE / SINE_FREQ_HZ;
+  if (sineCycleLength > 64) sineCycleLength = 64;
+  for (int i = 0; i < sineCycleLength; i++) {
+    sineWaveCycle[i] = (int16_t)(sin(2.0 * PI * i / sineCycleLength) * SINE_AMPLITUDE);
+  }
+  Serial.printf("Sine wave generator initialized (%d Hz @ %d Hz sample rate)\n", SINE_FREQ_HZ, AUDIO_SAMPLE_RATE);
+}
+
+void playIdleSineWave() {
+  if (isPlayingTTS) return;
+
+  // Generate a small chunk of 64 samples (128 bytes)
+  int16_t buffer[64];
+  for (int i = 0; i < 64; i++) {
+    buffer[i] = sineWaveCycle[sinePhaseIndex];
+    sinePhaseIndex = (sinePhaseIndex + 1) % sineCycleLength;
+  }
+
+  size_t bytesWritten = 0;
+  // Non-blocking quick DMA write (10ms timeout)
+  i2s_write(I2S_PORT, (const char*)buffer, sizeof(buffer), &bytesWritten, 10);
+}
+
 void setupI2SAudio() {
   i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
@@ -160,6 +193,7 @@ void setupI2SAudio() {
   }
 
   i2s_zero_dma_buffer(I2S_PORT);
+  initSineWave();
   Serial.println("I2S Audio initialized successfully.");
 }
 
@@ -169,8 +203,13 @@ void handleAudioData(WiFiClient& client, long pcmLength, int sampleRate) {
     return;
   }
   
+  // 1. Immediately pause the idle sine wave
+  isPlayingTTS = true;
+  i2s_zero_dma_buffer(I2S_PORT);
+
+  // 2. Set sample rate for incoming TTS
   i2s_set_sample_rates(I2S_PORT, sampleRate);
-  Serial.printf("Audio stream: %ld bytes @ %d Hz\n", pcmLength, sampleRate);
+  Serial.printf("Audio stream (TTS): %ld bytes @ %d Hz\n", pcmLength, sampleRate);
   client.println("OK");
   
   uint8_t buffer[AUDIO_BUF_SIZE];
@@ -195,8 +234,13 @@ void handleAudioData(WiFiClient& client, long pcmLength, int sampleRate) {
     }
   }
   
+  // 3. Clear DMA buffer & restore default sample rate for idle sine wave
   i2s_zero_dma_buffer(I2S_PORT);
-  Serial.printf("Audio complete. %ld bytes remaining.\n", bytesRemaining);
+  i2s_set_sample_rates(I2S_PORT, AUDIO_SAMPLE_RATE);
+  Serial.printf("TTS complete. Resuming idle sine wave.\n");
+
+  // 4. Resume idle sine wave
+  isPlayingTTS = false;
 }
 
 unsigned long lastReleaseTime = 0;
@@ -342,10 +386,13 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
   
-  // 1. Process hardware button presses (Single Tap / Long Press)
+  // 1. Process hardware button presses (Single Tap / Double Tap / Long Press)
   handleButton();
 
-  // 2. Continuously listen for incoming client requests
+  // 2. Play continuous idle sine wave through speaker when speaker is free
+  playIdleSineWave();
+
+  // 3. Continuously listen for incoming client requests
   server.handleClient();
 
   WiFiClient client = tcpServer.available();
@@ -354,6 +401,9 @@ void loop() {
     
     // Keep the connection alive as long as the client is connected
     while (client.connected()) {
+      handleButton();
+      playIdleSineWave();
+
       if (client.available()) {
         // Read the incoming TCP packet until a newline character
         String command = client.readStringUntil('\n'); 
